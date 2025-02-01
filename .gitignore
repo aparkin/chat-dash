@@ -1,0 +1,60 @@
+venv/
+env/
+ENV/
+/data/
+
+# Temporary files
+utilities/temp_batch/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment variables
+.env
+.env.local
+
+# OS specific
+.DS_Store
+versions/
+
+# Logs
+*.log
+
+# IDE
+*.code-workspace
+
+# Testing and Documentation
+tests/
+schema.md
+schema_old.md
+
+# Versions
+versions/
+
+# Legacy
+WeaviateQueryManager/

@@ -1,0 +1,8 @@
+__pycache__
+*.pyc
+.git
+.env
+venv/
+# Don't ignore assets and data directories
+!assets/
+!data/

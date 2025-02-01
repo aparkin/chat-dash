@@ -1,0 +1,43 @@
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.5; }
+    100% { opacity: 1; }
+}
+
+@keyframes bounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-5px); }
+}
+
+.mermaid {
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+}
+
+.mermaid svg {
+    min-width: 100%;
+    min-height: 100%;
+    cursor: move;
+}
+
+/* Add zoom and pan support */
+.mermaid .svg-pan-zoom_viewport {
+    cursor: move;
+}
+
+.mermaid:hover {
+    cursor: grab;
+}
+
+.mermaid:active {
+    cursor: grabbing;
+}
+
+.fa-download {
+    margin-right: 0;
+}
+
+.mr-2 {
+    margin-right: 0.5rem;
+}
