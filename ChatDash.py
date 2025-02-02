@@ -25,28 +25,21 @@ Usage Instructions:
 4. Dataset Analysis:
    - Preview: Shows first few rows of data
    - Statistics: Displays detailed profiling report
-   - Visualization: Coming soon
+   - Visualization: Interactive plots and charts
+   - Database: SQL database structure and ERD
+   - Weaviate: Vector database collections and relationships
+     * Table Summary: Collection statistics and properties
+     * ER Diagram: Visual representation of collection relationships
 
-Callback Chain Interactions:
-1. Dataset Upload Flow:
-   - upload-data -> datasets-store -> dataset-list
-   - Triggers memory usage update
-   - Updates text search index
-
-2. Chat Message Flow:
-   - send-button/Enter key -> chat message handler
-   - -> API call handler -> chat history update
-   - -> dataset highlighting (if dataset mentioned)
-
-3. Dataset Click Flow:
-   - dataset-card click -> chat input
-   - -> auto-triggers send
-   - -> updates active tab
-
-4. Delete Dataset Flow:
-   - delete button -> datasets-store
-   - -> updates list and memory usage
-   - -> cleans up text search index
+5. Database Connections:
+   - SQL Database:
+     * Select database from dropdown
+     * View schema and relationships
+     * Execute queries through chat
+   - Weaviate Vector Database:
+     * Real-time connection status
+     * Collection availability monitoring
+     * Detailed schema visualization
 
 Known Limitations:
 - Enter key to send messages is not currently supported due to Dash callback restrictions
@@ -89,6 +82,8 @@ from database_manager import DatabaseManager
 from dash_extensions import Mermaid
 from dotenv import load_dotenv
 from pathlib import Path
+from weaviate_integration import WeaviateConnection
+from weaviate_manager.query.manager import QueryManager
 
 # Find the project root directory (where .env is located)
 project_root = Path(__file__).parent
@@ -473,174 +468,89 @@ text_searcher_db = DatabaseTextSearch()
 client = openai.OpenAI(**OPENAI_CONFIG)
 
 # Initialize Dash app
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+app = dash.Dash(__name__, external_stylesheets=[
+    dbc.themes.BOOTSTRAP,
+    'https://use.fontawesome.com/releases/v5.15.4/css/all.css'  # Add Font Awesome
+])
 app.config.suppress_callback_exceptions = True
 
 # Helper Functions
 def create_system_message(dataset_info: List[Dict[str, Any]], 
                          search_query: Optional[str] = None,
-                         database_structure: Optional[Dict] = None) -> Dict[str, str]:
-    """Create a system message with dataset context, search results, and database schema.
-
+                         database_structure: Optional[Dict] = None,
+                         weaviate_results: Optional[Dict] = None) -> Dict[str, str]:
+    """Create system message with context from datasets, database, and literature.
+    
     Args:
-        dataset_info: List of dictionaries containing dataset metadata:
-            - name (str): Dataset name
-            - rows (int): Number of rows
-            - columns (List[str]): Column names
-            - metadata (Dict): Additional dataset metadata
-            - selected (bool): Whether dataset is currently selected
-        search_query: Optional search term to include relevant data matches
+        dataset_info: List of dataset information
+        search_query: Optional search query for context
         database_structure: Optional database schema information
-
-    Returns:
-        Dict[str, str]: System message in OpenAI message format
+        weaviate_results: Optional literature search results
     """
-    base_message = f"""You are a versatile AI assistant with multiple capabilities:
+    base_message = "You are a data analysis assistant with access to:"
 
-1. Dataset Analysis: You have access to the following datasets:
-{json.dumps(dataset_info, indent=2)}"""
+    # Track available data sources
+    has_datasets = bool(dataset_info)
+    has_database = bool(database_structure)
+    has_literature = weaviate_results is not None
 
-    # Add database context if available
-    if database_structure:
-        current_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        base_query_id = f"query_{current_timestamp}"
-        
-        base_message += f"""
+    # Add dataset information
+    if has_datasets:
+        base_message += "\n\nDatasets:"
+        for ds in dataset_info:
+            base_message += f"\n- {ds['name']}: {ds['rows']} rows, columns: {', '.join(ds['columns'])}"
+            if ds.get('selected'):
+                base_message += " (currently selected)"
 
-2. Database Expertise: You have access to a connected database with the following schema:
-{json.dumps(database_structure, indent=2)}
+    # Add database information
+    if has_database:
+        base_message += "\n\nConnected Database Tables:"
+        for table, info in database_structure.items():
+            base_message += f"\n- {table}: {info['row_count']} rows, columns: {', '.join(info['columns'])}"
 
-When handling database queries:
-CRITICAL INSTRUCTION: You MUST use this exact query ID prefix for all queries in this response: {base_query_id}
-
-Format ALL queries exactly as follows:
-
-1. For the user's original query (if provided):
-```sql
--- Query ID: {base_query_id}_original
--- Description: User's original query
-[original query]
-```
-
-2. For alternative suggestions:
-```sql
--- Query ID: {base_query_id}_alt1
--- Description: First alternative
-[alternative query 1]
-```
-
-```sql
--- Query ID: {base_query_id}_alt2
--- Description: Second alternative
-[alternative query 2]
-```
-
-DO NOT create your own timestamps or IDs.
-ONLY use {base_query_id} as the base ID for all queries in this response and append '_original', '_alt1', '_alt2', etc. as specified above.
-
-Users can execute queries by typing:
-- 'execute.' for the most recent query
-- 'execute {base_query_id}_suffix.' for a specific query (e.g., 'execute {base_query_id}_original.')"""
-
-    base_message += """
-
-3. General Knowledge: You can also provide helpful responses about topics outside of these datasets.
-
-When responding to queries:
-- If the query relates to the available datasets, prioritize analyzing that data
-- If you find relevant information in the datasets, include it in your response
-- If you recognize a SQL query, analyze it and suggest improvements if needed
-- If you receive a natural language database question, propose an appropriate SQL query
-- Ensure all SQL queries are valid for SQLite and don't use extended features for other databases
-- If the query is not related to the datasets or no relevant data is found, provide a helpful response using your general knowledge
-- You can combine dataset insights, database knowledge, and general knowledge when appropriate"""
-
-    # Add search results if a query was provided
-    if search_query:
-        # Dataset search results
-        dataset_results = text_searcher.search_text(search_query, threshold=0.8, coverage=0.5)
-        
-        # Database search results
-        print(f"Searching for {search_query} with threshold 0.8 in database. Time: {datetime.now()}")
-        db_results = text_searcher_db.search_text(search_query, threshold=0.8, coverage=0.5)
-        print(f"Returned {len(db_results)} results from database. Time: {datetime.now()}")
-
-        search_info = []
-
-        # Process all results uniformly
-        all_results = dataset_results + db_results
-        
-        if all_results:
-            for result in all_results:
-                source_type = result['source_type']
-                source_name = result['source_name']
-                matches = []
+    # Add literature information
+    if has_literature:
+        base_message += "\n\nLiterature Database: Connected and available for queries"
+        if weaviate_results:
+            df = transform_weaviate_results(weaviate_results)
+            if not df.empty:
+                base_message += f"\n\nFound {len(df)} relevant items:"
+                # Show top 5 results with key information
+                sample = df.head()
+                for _, row in sample.iterrows():
+                    base_message += f"\n- [{row['collection']} {row['object_id']}] "
+                    if 'title' in row['properties']:
+                        base_message += f"{row['properties']['title']}"
+                    elif 'name' in row['properties']:
+                        base_message += f"{row['properties']['name']}"
+                    base_message += f" (score: {row['score']:.2f})"
                 
-                for col, col_data in result['details'].items():
-                    matching_values = col_data['matches']
-                    counts = col_data['counts']
-                    matches.append(f"Column '{col}' contains: " +
-                                 ", ".join(f"'{v}' ({counts[v]} times)"
-                                         for v in matching_values))
-                if matches:
-                    search_info.append(f"\nIn {source_type} {source_name}:\n" + "\n".join(matches))
+                if len(df) > 5:
+                    base_message += f"\n... and {len(df) - 5} more results"
+                
+                base_message += "\n\nPlease incorporate these findings in your response."
 
-        print(f"search_info: {search_info}\n--------\n")
-        if search_info:
-            base_message += """
-
-Relevant Data Found:
-When reporting search results, ALWAYS use this structured format:
-
-1. Overview Summary:
-   - Total matches found: [N] across [X] datasets and [Y] database tables
-   - List all tables/datasets containing matches: [table1], [table2], etc.
-
-2. Key Matches (grouped by context):
-   [Group description, e.g., "Enzyme Names"]
-   - Found in: [table1.column1], [table2.column2]
-   - Example values: '[value1]' (N occurrences), '[value2]' (M occurrences)
-   
-   [Next group description, e.g., "Measurement Types"]
-   - Found in: [table3.column1]
-   - Example values: '[value3]' (P occurrences)
-
-3. Additional Context:
-   - Describe any patterns or relationships between matches
-   - Note any particularly relevant or high-frequency matches
-
-CRITICAL: When summarizing results:
-1. ALWAYS start with the complete list of tables/datasets containing matches
-2. Group similar matches together with clear context
-3. Show representative examples with exact match counts
-4. Highlight the most relevant matches first
-5. Ensure no significant matches are omitted from the summary
-6. Maintain clear structure and formatting
-
-Here are the actual matches found:
-""" + "\n".join(search_info)
-        else:
-            base_message += """
-
-No Matches Found:
-1. Explicitly state that no matches were found with similarity > 0.8
-2. Specify where searches were performed:
-   - Datasets: [list available datasets]
-   - Database tables: [list searched tables]
-3. If appropriate, suggest:
-   - Alternative search terms
-   - Related terms that might yield results
-   - Other relevant data that might be helpful
-4. Do not make up results"""
-
-    base_message += """
-
-Remember to:
-1. Always specify which dataset or database you're referring to or if you are drawing from general knowledge
-2. Only suggest SQL queries for connected databases and not datasets 
-2. Be clear when you're drawing from general knowledge vs data sources
-3. Provide helpful context and explanations
-4. Combine insights from all available sources when it adds value"""
+    # Add instructions for handling different types of queries
+    base_message += "\n\nWhen responding to queries:"
+    
+    if has_datasets:
+        base_message += "\n- If the query relates to the available datasets, analyze that data"
+        base_message += "\n- If you find relevant information in the datasets, include it in your response"
+    
+    if has_database:
+        base_message += "\n- If you recognize a SQL query, analyze it and suggest improvements if needed"
+        base_message += "\n- If you receive a natural language database question, propose an appropriate SQL query"
+        base_message += "\n- Ensure all SQL queries are valid for SQLite and don't use extended features"
+    else:
+        base_message += "\n- DO NOT suggest SQL queries as no database is connected"
+    
+    if has_literature:
+        base_message += "\n- If literature results are available, integrate relevant findings with other information"
+        base_message += "\n- When referencing literature, always include the [Collection ID] identifier"
+    
+    base_message += "\n- You can combine available data sources with general knowledge"
+    base_message += "\n- If no specific data is found, provide a helpful response using your general knowledge"
+    base_message += "\n- NEVER suggest querying data sources that are not currently connected"
 
     return {
         'role': 'system',
@@ -909,6 +819,35 @@ def create_database_tab():
         ], id="database-view-tabs")
     ])
 
+def create_weaviate_tab():
+    """Create the Weaviate information tab layout."""
+    return html.Div([
+        dbc.Tabs([
+            dbc.Tab(
+                label="Table Summary",
+                children=html.Div(id='weaviate-summary'),
+                tab_id="tab-weaviate-summary"
+            ),
+            dbc.Tab(
+                label="ER Diagram",
+                children=html.Div([
+                    html.Div(
+                        id='weaviate-erd',
+                        style={
+                            'width': '100%',
+                            'height': '600px',
+                            'overflow': 'auto',
+                            'border': '1px solid #ddd',
+                            'borderRadius': '5px',
+                            'padding': '10px'
+                        }
+                    )
+                ]),
+                tab_id="tab-weaviate-erd"
+            )
+        ], id="weaviate-view-tabs")
+    ])
+
 def create_dataset_card(name: str, data: Dict[str, Any]) -> dbc.Card:
     """Create a card component for displaying dataset information."""
     return dbc.Card(
@@ -968,6 +907,13 @@ app.layout = html.Div([
         'data': {}
     }),
     dcc.Store(id='successful-queries-store', storage_type='memory', data={}),
+    # Add Weaviate state store
+    dcc.Store(id='weaviate-state', data={
+        'connection': {'status': 'disconnected', 'message': 'Not connected'},
+        'collections': {'status': 'unavailable', 'message': 'No collections'}
+    }),
+    # Add interval for periodic status checks
+    dcc.Interval(id='weaviate-status-interval', interval=30000),  # 30 seconds
     dbc.Container([
         # Top Row with Dataset Browser and Info
         dbc.Row([
@@ -1008,7 +954,29 @@ app.layout = html.Div([
                         'alignItems': 'center',  # Vertically center items
                         'marginBottom': '10px'
                     }),
-                    html.Div(id='database-connection-status', className="mb-3")
+                    # Add Weaviate status indicators
+                    dbc.Row([
+                        dbc.Col([
+                            html.Div(id='database-connection-status', className="mb-3"),
+                            html.Div([
+                                html.Span("Weaviate: ", className="mr-2"),
+                                dbc.Tooltip(
+                                    id='weaviate-connection-tooltip',
+                                    target='weaviate-connection-icon',
+                                    placement='top'
+                                ),
+                                html.I(id='weaviate-connection-icon', className="fas fa-circle", 
+                                     style={'color': '#6c757d', 'marginRight': '5px'}),  # Neutral gray
+                                dbc.Tooltip(
+                                    id='weaviate-collections-tooltip',
+                                    target='weaviate-collections-icon',
+                                    placement='top'
+                                ),
+                                html.I(id='weaviate-collections-icon', className="fas fa-database",
+                                     style={'color': '#6c757d'})  # Neutral gray
+                            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '5px'})
+                        ])
+                    ])
                 ]),               
                 # Upload Component
                 dcc.Upload(
@@ -1074,7 +1042,8 @@ app.layout = html.Div([
                         dbc.Tab(label="Preview", tab_id="tab-preview"),
                         dbc.Tab(label="Statistics", tab_id="tab-stats"),
                         dbc.Tab(label="Visualization", tab_id="tab-viz"),
-                        dbc.Tab(label="Database", tab_id="tab-db", children=create_database_tab())  # Add this line
+                        dbc.Tab(label="Database", tab_id="tab-db", children=create_database_tab()),
+                        dbc.Tab(label="Weaviate", tab_id="tab-weaviate", children=create_weaviate_tab())  # Add Weaviate tab
                     ],
                     id="dataset-tabs",
                     active_tab="tab-preview"
@@ -1207,10 +1176,37 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
     try:
         if not input_value:
             return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
-
+        
         chat_history = chat_history or []
         chat_history.append({'role': 'user', 'content': input_value.strip()})
-
+        
+        # Check for threshold setting command first
+        threshold = extract_threshold_from_message(input_value)
+        if threshold is not None and any(msg.get('pending_literature_query') for msg in reversed(chat_history[:-1])):
+            # Execute pending literature query with threshold
+            for msg in reversed(chat_history[:-1]):
+                if msg.get('pending_literature_query'):
+                    query_text = msg['pending_literature_query']
+                    try:
+                        results = execute_weaviate_query(query_text, threshold)
+                        df = transform_weaviate_results(results)
+                        preview = format_results_preview(df)
+                        msg.pop('pending_literature_query')  # Clear pending query
+                        
+                        # Add results preview to chat
+                        chat_history.append({
+                            'role': 'assistant',
+                            'content': f"Here are the relevant results with a minimum score threshold of {threshold}:\n\n{preview}"
+                        })
+                        
+                        return create_chat_elements_batch(chat_history), '', chat_history, dash.no_update, dash.no_update, ""
+                    except Exception as e:
+                        chat_history.append({
+                            'role': 'assistant',
+                            'content': f"Error executing literature query: {str(e)}"
+                        })
+                        return create_chat_elements_batch(chat_history), '', chat_history, dash.no_update, dash.no_update, ""
+        
         # Prepare dataset information for the system message
         dataset_info = []
         if datasets:
@@ -1223,234 +1219,116 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                     'metadata': dataset.get('metadata', {}),
                     'selected': name == selected_dataset
                 }
-                dataset_info.append(info)                
-        else:
-            system_message = create_system_message([], database_structure=database_structure_store)
-
-        # Intercept text search requests and create system message with appropriate context
-        if datasets or database_structure_store: 
-            if 'find' == input_value.lower().split()[0] or 'search' == input_value.lower().split()[0]:
-                input_value = ' '.join(input_value.lower().split()[1:])
-                system_message = create_system_message(dataset_info, search_query=input_value, database_structure=database_structure_store)
-            else:
-                system_message = create_system_message(dataset_info, database_structure=database_structure_store)
-
-        # Check for visualization request
-        viz_type = VisualizationHandler.detect_type(input_value)
-        if viz_type and selected_dataset and selected_dataset in datasets:
-            df = pd.DataFrame(datasets[selected_dataset]['df'])
-            
-            if viz_type == 'bubble':
-                params, error_msg = extract_plot_params(input_value, list(df.columns))
-                
-                if error_msg:
-                    chat_history.append({
-                        'role': 'assistant',
-                        'content': f"{error_msg}\n\nAvailable columns are: {', '.join(df.columns)}"
-                    })
-                    return (
-                        create_chat_elements_batch(chat_history),
-                        '',
-                        chat_history,
-                        dash.no_update,
-                        dash.no_update,
-                        ""
-                    )
-
-                chat_history.append({
-                    'role': 'assistant',
-                    'content': (
-                        f"I've set up a bubble plot with:\n"
-                        f"- X: {params['x_column']}\n"
-                        f"- Y: {params['y_column']}\n"
-                        f"- Size: {params['size'] if params['size'] else 'default'}\n"
-                        f"- Color: {params['color'] if params['color'] else 'default'}\n\n"
-                        f"You can view and adjust the plot in the Visualization tab."
-                    )
-                })
-                
-                viz_state = {
-                    'type': 'bubble',
-                    'params': params,
-                    'data': df.to_dict('records')
-                }
-                
-                return (
-                    create_chat_elements_batch(chat_history),
-                    '',
-                    chat_history,
-                    'tab-viz',
-                    viz_state,""
-                )
-            elif viz_type == 'map':
-                if not selected_dataset:
-                    chat_history.append({
-                        'role': 'assistant',
-                        'content': "Please select a dataset first."
-                    })
-                    return (
-                        create_chat_elements_batch(chat_history),
-                        '',
-                        chat_history,
-                        dash.no_update,
-                        dash.no_update,
-                        ""
-                    )
-                    
-                df = pd.DataFrame(datasets[selected_dataset]['df'])
-                params, error_msg = extract_map_params(input_value, list(df.columns))
-                
-                if error_msg:
-                    chat_history.append({
-                        'role': 'assistant',
-                        'content': f"{error_msg}\n\nAvailable columns are: {', '.join(df.columns)}"
-                    })
-                    return (
-                        create_chat_elements_batch(chat_history),
-                        '',
-                        chat_history,
-                        dash.no_update,
-                        dash.no_update,
-                        ""
-                    )
-                    
-                chat_history.append({
-                    'role': 'assistant',
-                    'content': (
-                        f"I've set up a map with:\n"
-                        f"- Latitude: {params['latitude']}\n"
-                        f"- Longitude: {params['longitude']}\n"
-                        f"- Size: {params['size'] if params['size'] else 'default'}\n"
-                        f"- Color: {params['color'] if params['color'] else 'default'}\n\n"
-                        f"You can view and adjust the map in the Visualization tab."
-                    )
-                })
-                
-                viz_state = {
-                    'type': 'map',
-                    'params': params,
-                    'data': df.to_dict('records')
-                }
-                
-                return (
-                    create_chat_elements_batch(chat_history),
-                    '',
-                    chat_history,
-                    'tab-viz',
-                    viz_state,
-                    ""
-                )
-            elif viz_type == 'heatmap':
-                params, error_msg = extract_heatmap_params(input_value, list(df.columns))
-                if error_msg:
-                    chat_history.append({
-                        'role': 'assistant',
-                        'content': f"{error_msg}\n\nAvailable columns are: {', '.join(df.columns)}"
-                    })
-                    return (
-                        create_chat_elements_batch(chat_history),
-                        '',
-                        chat_history,
-                        dash.no_update,
-                        dash.no_update,
-                        ""
-                    )
-                
-                # Add confirmation message with escaped column names
-                column_list = params['columns'] if params['columns'] else 'all numeric columns'
-                if isinstance(column_list, list):
-                    column_list = '`' + '`, `'.join(column_list) + '`'  # Wrap column names in backticks
-                    
-                chat_history.append({
-                    'role': 'assistant',
-                    'content': (
-                        f"I've set up a heatmap with:\n"
-                        f"- Rows: {params['rows'] if params['rows'] else 'all numeric columns'}\n"
-                        f"- Columns: {column_list}\n"
-                        f"- Standardization: {params['standardize'] if params['standardize'] else 'none'}\n"
-                        f"- Clustering: {params['cluster'] if params['cluster'] else 'none'}\n"
-                        f"- Colormap: {params['colormap']}\n"
-                        f"- Transpose: {str(params['transpose']).lower()}\n\n"  # Always show transpose status
-                        f"You can view and adjust the heatmap in the Visualization tab."
-                    )
-                })
-                
-                viz_state = {
-                    'type': 'heatmap',
-                    'params': params,
-                    'data': df.to_dict('records')
-                }
-                
-                return (
-                    create_chat_elements_batch(chat_history),
-                    '',
-                    chat_history,
-                    'tab-viz',
-                    viz_state,
-                    ""
-                )
-        else:
-            # Regular chat processing with dataset context
-
-            # Check for help request
-            help_patterns = [
-                r'what can (i|you|we) do',
-                r'how (do|can) (i|we) use',
-                r'help',
-                r'show me how',
-                r'what (are|is) the capabilities',
-                r'what (are|is) the features'
-            ]
-            
-            if any(re.search(pattern, input_value.lower()) for pattern in help_patterns):
-                chat_history.append({
-                    'role': 'assistant',
-                    'content': help_message
-                })
-                return (
-                    create_chat_elements_batch(chat_history),  # chat-history
-                    '',                                        # chat-input
-                    chat_history,                             # chat-store
-                    dash.no_update,                           # dataset-tabs
-                    dash.no_update,                           # viz-state-store
-                    ""                                        # chat-loading-output
-                )
-            
-            messages = [
-                {'role': 'user', 'content': 'You are a data analysis assistant. Please help me analyze my data.'},
-                system_message,
-                *[{'role': msg['role'], 'content': msg['content']}
-                    for msg in chat_history[-5:]]  # Include last 5 messages for context
-            ]
-
+                dataset_info.append(info)
+        
+        # Check for literature query and get results if applicable
+        weaviate_results = None
+        is_lit, query = is_literature_query(input_value)
+        if is_lit and query:
             try:
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=0.7,
-                    max_tokens=4096 # This needs to be large given the size of some of the SQL responses. 
-                )
-
-                ai_response = response.choices[0].message.content
-                chat_history.append({
-                    'role': 'assistant',
-                    'content': ai_response
-                })
-
+                # Get initial results with low threshold for preview
+                weaviate_results = execute_weaviate_query(query, min_score=0.1)
+                # Store query for threshold setting
+                chat_history[-1]['pending_literature_query'] = query
             except Exception as e:
-                error_message = f"Error communicating with AI: {str(e)}"
-                print(f"API Error details: {str(e)}")
-                chat_history.append({
-                    'role': 'system',
-                    'content': error_message
-                })
-        # Handle non-visualization messages
+                print(f"Error in literature query: {str(e)}")
+                # Continue with general knowledge even if literature query fails
+        
+        # Create system message with all available context
+        system_message = create_system_message(
+            dataset_info,
+            search_query=input_value if 'find' in input_value.lower() or 'search' in input_value.lower() else None,
+            database_structure=database_structure_store,
+            weaviate_results=weaviate_results
+        )
+        
+        # Rest of the existing function remains unchanged
+        messages = [
+            {'role': 'user', 'content': 'You are a data analysis assistant. Please help me analyze my data.'},
+            system_message,
+            *[{'role': msg['role'], 'content': msg['content']}
+                for msg in chat_history[-5:]]  # Include last 5 messages for context
+        ]
+
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=4096
+            )
+
+            ai_response = response.choices[0].message.content
+            
+            # If we have pending literature results, append the score distribution
+            if weaviate_results and chat_history[-1].get('pending_literature_query'):
+                df = transform_weaviate_results(weaviate_results)
+                distribution = generate_score_distribution(df)
+                ai_response += f"\n\n{distribution}"
+            
+            chat_history.append({
+                'role': 'assistant',
+                'content': ai_response
+            })
+
+        except Exception as e:
+            error_message = f"Error communicating with AI: {str(e)}"
+            print(f"API Error details: {str(e)}")
+            chat_history.append({
+                'role': 'system',
+                'content': error_message
+            })
+            
         return create_chat_elements_batch(chat_history), '', chat_history, dash.no_update, dash.no_update, dash.no_update
     
     except Exception as e:
         print(f"Error in handle_chat_message: {str(e)}")
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+
+def get_weaviate_client():
+    """Get or create Weaviate client instance."""
+    try:
+        connection = WeaviateConnection()
+        with connection.get_client() as client:
+            if not client:
+                raise Exception("No Weaviate client available")
+            return client
+    except Exception as e:
+        print(f"Error connecting to Weaviate: {str(e)}")
+        return None
+
+def execute_weaviate_query(query: str, min_score: float = 0.3) -> dict:
+    """Execute a query through weaviate_manager.
     
+    Args:
+        query: Search query text
+        min_score: Minimum score threshold
+        
+    Returns:
+        Dict containing query results
+    """
+    try:
+        connection = WeaviateConnection()
+        with connection.get_client() as client:
+            if not client:
+                raise Exception("Could not connect to Weaviate")
+                
+            # Use the QueryManager from weaviate_manager
+            query_manager = QueryManager(client)
+            results = query_manager.comprehensive_search(
+                query_text=query,
+                search_type="hybrid",
+                min_score=min_score,
+                unify_results=True,  # Get unified article view
+                verbose=True  # For debugging
+            )
+            
+            return results
+            
+    except Exception as e:
+        print(f"Error in execute_weaviate_query: {str(e)}")
+        raise
+
 # Download chat history
 @callback(
     Output("download-chat", "data"),
@@ -3595,6 +3473,545 @@ def update_database_views(structure_data):
     
     return summary, erd
 
-# Run the app
+@callback(
+    [Output('weaviate-connection-icon', 'style'),
+     Output('weaviate-collections-icon', 'style'),
+     Output('weaviate-state', 'data')],
+    [Input('weaviate-status-interval', 'n_intervals')],
+    [State('weaviate-state', 'data')]
+)
+def update_weaviate_status(n_intervals, current_state):
+    """Update Weaviate connection and collection status."""
+    try:
+        from weaviate_integration import WeaviateConnection
+        
+        # Get current status
+        weaviate = WeaviateConnection()
+        status = weaviate.get_status()
+        
+        # Define status colors (colorblind-friendly)
+        colors = {
+            'connected': '#2ecc71',    # Teal for success
+            'error': '#e67e22',        # Orange for error
+            'disconnected': '#6c757d',  # Neutral gray
+            'available': '#2ecc71',     # Teal for success
+            'unavailable': '#6c757d',   # Neutral gray
+            'warning': '#3498db'        # Light teal for warning
+        }
+        
+        # Update connection icon style
+        conn_style = {
+            'color': colors[status['connection']['status']],
+            'marginRight': '5px'
+        }
+        
+        # Update collections icon style
+        coll_style = {
+            'color': colors[status['collections']['status']]
+        }
+        
+        return conn_style, coll_style, status
+        
+    except Exception as e:
+        print(f"Error updating Weaviate status: {str(e)}")
+        # Return neutral gray for both icons on error
+        return (
+            {'color': '#6c757d', 'marginRight': '5px'},
+            {'color': '#6c757d'},
+            current_state
+        )
+
+@callback(
+    [Output('weaviate-connection-tooltip', 'children'),
+     Output('weaviate-collections-tooltip', 'children')],
+    Input('weaviate-state', 'data')
+)
+def update_weaviate_tooltips(state):
+    """Update tooltips with status messages."""
+    if not state:
+        return "Not initialized", "Not initialized"
+        
+    conn_msg = state['connection']['message']
+    coll_msg = state['collections']['message']
+    
+    return conn_msg, coll_msg
+
+@callback(
+    [Output('weaviate-summary', 'children'),
+     Output('weaviate-erd', 'children')],
+    [Input('weaviate-state', 'data')],
+    prevent_initial_call=True
+)
+def update_weaviate_views(weaviate_state):
+    """Update both table summary and ERD visualization for Weaviate."""
+    if not weaviate_state or weaviate_state['connection']['status'] != 'connected':
+        return "No Weaviate connection", None
+
+    try:
+        from weaviate_manager.database.inspector import DatabaseInspector
+        from weaviate_manager.database.client import get_client
+
+        # Get schema info using weaviate_manager
+        with get_client() as client:
+            inspector = DatabaseInspector(client)
+            schema_info = inspector.get_schema_info()
+
+            if not schema_info:
+                return "No collections exist in Weaviate", None
+
+            # Create styled HTML content with container for width control
+            html_content = [
+                html.Div([
+                    html.H3("Collections Overview", 
+                           className="mb-4",
+                           style={'color': '#2c3e50', 'borderBottom': '2px solid #3498db', 'paddingBottom': '10px'}),
+                    html.Table([
+                        html.Thead(html.Tr([
+                            html.Th("Collection", style={'backgroundColor': '#e9ecef'}),
+                            html.Th("Objects", style={'backgroundColor': '#e9ecef'}),
+                            html.Th("Properties", style={'backgroundColor': '#e9ecef'}),
+                            html.Th("Vectorized", style={'backgroundColor': '#e9ecef'}),
+                            html.Th("References", style={'backgroundColor': '#e9ecef'})
+                        ])),
+                        html.Tbody([
+                            html.Tr([
+                                html.Td(name),
+                                html.Td(f"{client.collections.get(name).aggregate.over_all().total_count:,}"),
+                                html.Td(str(len(info['properties']))),
+                                html.Td(
+                                    f"✓ ({sum(1 for p in info.get('properties', []) if p.get('vectorize'))})" 
+                                    if any(p.get('vectorize') for p in info.get('properties', [])) 
+                                    else "-"
+                                ),
+                                html.Td(str(len(info['references'])))
+                            ], style={'backgroundColor': '#ffffff' if i % 2 == 0 else '#f8f9fa'})
+                            for i, (name, info) in enumerate(schema_info.items())
+                        ])
+                    ], className="table table-bordered", style={'marginBottom': '2rem'})
+                ], style={
+                    'marginBottom': '3rem',
+                    'width': '80%',
+                    'marginLeft': 'auto',
+                    'marginRight': 'auto'
+                })
+            ]
+
+            # Add detailed collection sections
+            for name, info in schema_info.items():
+                collection_section = html.Div([
+                    # Collection header with emphasized styling
+                    html.Div([
+                        html.H4(name, style={
+                            'backgroundColor': '#3498db',
+                            'color': 'white',
+                            'padding': '10px 15px',
+                            'borderRadius': '5px',
+                            'marginBottom': '20px',
+                            'boxShadow': '0 2px 4px rgba(0,0,0,0.1)'
+                        })
+                    ]),
+                    
+                    # Properties table
+                    html.H5("Properties", className="mb-2", style={'color': '#2c3e50'}),
+                    html.Table([
+                        html.Thead(html.Tr([
+                            html.Th("Name", style={'backgroundColor': '#e9ecef'}),
+                            html.Th("Type", style={'backgroundColor': '#e9ecef'}),
+                            html.Th("Vectorized", style={'backgroundColor': '#e9ecef'}),
+                            html.Th("Description", style={'backgroundColor': '#e9ecef'})
+                        ])),
+                        html.Tbody([
+                            html.Tr([
+                                html.Td(prop['name']),
+                                html.Td(prop['type']),
+                                html.Td("✓" if prop.get('vectorize') else "-"),
+                                html.Td(prop.get('description', ''))
+                            ], style={'backgroundColor': '#ffffff' if i % 2 == 0 else '#f8f9fa'})
+                            for i, prop in enumerate(info['properties'])
+                        ])
+                    ], className="table table-bordered", style={'marginBottom': '2rem'})
+                ], style={
+                    'marginBottom': '3rem',
+                    'width': '80%',
+                    'marginLeft': 'auto',
+                    'marginRight': 'auto',
+                    'backgroundColor': '#ffffff',
+                    'padding': '20px',
+                    'borderRadius': '8px',
+                    'boxShadow': '0 2px 4px rgba(0,0,0,0.05)'
+                })
+                
+                # Add references table if there are any
+                if info['references']:
+                    collection_section.children.extend([
+                        html.H5("References", className="mb-2", style={'color': '#2c3e50'}),
+                        html.Table([
+                            html.Thead(html.Tr([
+                                html.Th("Name", style={'backgroundColor': '#e9ecef'}),
+                                html.Th("Target Collection", style={'backgroundColor': '#e9ecef'}),
+                                html.Th("Description", style={'backgroundColor': '#e9ecef'})
+                            ])),
+                            html.Tbody([
+                                html.Tr([
+                                    html.Td(ref['name']),
+                                    html.Td(ref['target']),
+                                    html.Td(ref.get('description', ''))
+                                ], style={'backgroundColor': '#ffffff' if i % 2 == 0 else '#f8f9fa'})
+                                for i, ref in enumerate(info['references'])
+                            ])
+                        ], className="table table-bordered", style={'marginBottom': '2rem'})
+                    ])
+                
+                html_content.append(collection_section)
+
+            # Wrap all content in a container
+            content_wrapper = html.Div(html_content, style={
+                'padding': '20px',
+                'backgroundColor': '#f8f9fa',
+                'minHeight': '100%'
+            })
+
+            # Generate ERD
+            mermaid_code = inspector.generate_mermaid_erd()
+            # Remove the markdown code block markers for Mermaid component
+            if mermaid_code.startswith('```mermaid\n'):
+                mermaid_code = mermaid_code[len('```mermaid\n'):]
+            if mermaid_code.endswith('```'):
+                mermaid_code = mermaid_code[:-3]
+
+            erd = html.Div([
+                Mermaid(
+                    chart=mermaid_code,
+                    config={
+                        "theme": "default",
+                        "securityLevel": "loose",
+                        "er": {
+                            "layoutDirection": "TB",
+                            "entityPadding": 15,
+                            "useMaxWidth": True
+                        }
+                    }
+                )
+            ], style={
+                'width': '100%',
+                'height': '600px',
+                'overflow': 'auto',
+                'position': 'relative'
+            })
+
+            return content_wrapper, erd
+
+    except Exception as e:
+        error_msg = f"Error updating Weaviate views: {str(e)}"
+        print(f"Detailed error: {str(e)}")  # Add detailed logging
+        return error_msg, html.Div(error_msg, style={'color': 'red'})
+
+def transform_weaviate_results(json_results: dict) -> pd.DataFrame:
+    """Transform Weaviate JSON results into a structured DataFrame.
+    
+    Args:
+        json_results: Raw JSON results from Weaviate query
+        
+    Returns:
+        pd.DataFrame with columns:
+        - score: Search relevance score
+        - collection: Source collection name
+        - object_id: Weaviate object ID
+        - properties: Dict of object properties
+        - cross_references: Dict of cross-references
+    """
+    # Define expected columns in desired order
+    columns = ['score', 'collection', 'object_id', 'properties', 'cross_references']
+    
+    # Handle empty results
+    if not json_results:
+        return pd.DataFrame(columns=columns)
+    
+    rows = []
+    
+    # Process direct hits from each collection
+    for collection_name, hits in json_results.items():
+        if collection_name != 'unified_results' and isinstance(hits, list):
+            for hit in hits:
+                rows.append({
+                    'score': hit.get('score', 0.0),
+                    'collection': collection_name,
+                    'object_id': hit.get('id', ''),
+                    'properties': hit.get('properties', {}),
+                    'cross_references': hit.get('cross_references', {})
+                })
+    
+    # Process unified results (which includes referenced articles)
+    if 'unified_results' in json_results and isinstance(json_results['unified_results'], list):
+        for result in json_results['unified_results']:
+            rows.append({
+                'score': result.get('score', 0.0),
+                'collection': result.get('collection', 'Article'),
+                'object_id': result.get('id', ''),
+                'properties': {k: v for k, v in result.items() 
+                             if k not in ['id', 'score', 'collection', 'cross_references']},
+                'cross_references': result.get('cross_references', {})
+            })
+    
+    # Create DataFrame with columns in specified order and sort by score
+    df = pd.DataFrame(rows, columns=columns)
+    df = df.sort_values('score', ascending=False)
+    
+    return df
+
+def format_results_preview(df: pd.DataFrame, max_rows: int = 5) -> str:
+    """Format a preview of the search results.
+    
+    Args:
+        df: DataFrame with transformed Weaviate results
+        max_rows: Maximum number of rows to show
+        
+    Returns:
+        Markdown formatted string with results preview
+    """
+    if df.empty:
+        return "No results found."
+    
+    # Create display DataFrame with property and reference counts in desired order
+    display_df = pd.DataFrame({
+        'Score': df['score'].round(3),
+        'Collection': df['collection'],
+        'ID': df['object_id'],
+        'Properties': df['properties'].apply(len),
+        'References': df['cross_references'].apply(len)
+    })
+    
+    # Format as markdown table
+    preview = ["### Search Results", ""]
+    preview.append("| Score | Collection | ID | Properties | References |")
+    preview.append("|--------|------------|-----|------------|------------|")
+    
+    # Add rows
+    for _, row in display_df.head(max_rows).iterrows():
+        preview.append(
+            f"| {row['Score']} | {row['Collection']} | {row['ID']} | {row['Properties']} | {row['References']} |"
+        )
+    
+    if len(df) > max_rows:
+        preview.append(f"\n... and {len(df) - max_rows} more results.")
+    
+    return "\n".join(preview)
+
+def generate_score_distribution(df: pd.DataFrame) -> str:
+    """Generate a markdown summary of result score distribution.
+    
+    Args:
+        df: DataFrame with results from transform_weaviate_results
+        
+    Returns:
+        Markdown formatted string showing score distribution
+    """
+    if df.empty:
+        return "No results found."
+        
+    # Get total counts by collection
+    collection_counts = df['collection'].value_counts()
+    total_results = len(df)
+    
+    # Calculate counts at different thresholds
+    thresholds = [0.1, 0.3, 0.5, 0.7, 0.9]
+    threshold_results = []
+    
+    for threshold in thresholds:
+        filtered_df = df[df['score'] >= threshold]
+        if len(filtered_df) > 0:
+            # Get counts by collection for this threshold
+            counts = filtered_df['collection'].value_counts()
+            details = ", ".join([f"{col}: {count}" for col, count in counts.items()])
+            threshold_results.append({
+                'threshold': threshold,
+                'total': len(filtered_df),
+                'details': details
+            })
+    
+    # Build markdown output
+    output = ["Results at different relevance thresholds:\n"]
+    
+    # Add collection totals
+    output.append("Total results by collection:")
+    for collection, count in collection_counts.items():
+        output.append(f"- {collection}: {count}")
+    output.append("")
+    
+    # Add threshold table
+    output.append("| Minimum Score | Total Results | Details |")
+    output.append("|--------------|---------------|----------|")
+    for result in threshold_results:
+        output.append(f"| {result['threshold']:.1f} | {result['total']} | {result['details']} |")
+    
+    # Add instructions
+    output.append("\nTo view results, specify a minimum relevance score using: Use threshold X.X")
+    output.append("\nFor example:")
+    output.append("- Use threshold 0.3 for broader coverage")
+    output.append("- Use threshold 0.7 for high-relevance results only")
+    output.append("\nNote: This command specifically sets the literature search threshold.")
+    
+    return "\n".join(output)
+
+def is_literature_query(message: str) -> Tuple[bool, Optional[str]]:
+    """Detect if a message is asking about scientific literature and extract the core query.
+    
+    Args:
+        message: User's chat message
+        
+    Returns:
+        Tuple of (is_literature_query: bool, extracted_query: Optional[str])
+        
+    Examples:
+        >>> is_literature_query("What is known about gene regulation?")
+        (True, "gene regulation")
+        >>> is_literature_query("Find papers about CRISPR")
+        (True, "CRISPR")
+        >>> is_literature_query("Plot temperature vs time")
+        (False, None)
+    """
+    # Common research-related phrases
+    research_patterns = [
+        r"(?:what is|what's) known about\s+(.+?)(?:\?|$)",
+        r"(?:find|search for|look for|get) (?:papers|articles|literature|research) (?:about|on|related to)\s+(.+?)(?:\?|$)",
+        r"tell me about the research (?:on|in|about)\s+(.+?)(?:\?|$)",
+        r"what research exists (?:on|about)\s+(.+?)(?:\?|$)",
+        r"what (?:papers|articles) discuss\s+(.+?)(?:\?|$)",
+        r"show me papers about\s+(.+?)(?:\?|$)"
+    ]
+    
+    # Clean and normalize message
+    message = message.lower().strip()
+    
+    # Try each pattern
+    for pattern in research_patterns:
+        match = re.search(pattern, message)
+        if match:
+            query = match.group(1).strip()
+            # Remove common filler words from the end
+            query = re.sub(r'\s+(?:in|on|about|for|to)\s*$', '', query)
+            return True, query
+    
+    # Check for direct research terms
+    research_terms = {'papers', 'articles', 'literature', 'publications', 'studies', 'research'}
+    message_words = set(message.split())
+    if research_terms & message_words:
+        # Extract potential query by removing research terms and common words
+        words = [w for w in message.split() if w not in research_terms and w not in {'find', 'search', 'get', 'about', 'on', 'in', 'the', 'for', 'me'}]
+        if words:
+            return True, ' '.join(words)
+    
+    return False, None
+
+def extract_threshold_from_message(message: str) -> Optional[float]:
+    """Extract threshold value from user message.
+    
+    Args:
+        message: User's chat message
+        
+    Returns:
+        Float threshold value or None if not found/invalid
+        
+    Examples:
+        >>> extract_threshold_from_message("Use threshold 0.3")
+        0.3
+        >>> extract_threshold_from_message("Set cutoff to 0.7")
+        0.7
+    """
+    patterns = [
+        r"(?:use|set|apply|with)\s+(?:a\s+)?(?:threshold|cutoff|score|limit)\s+(?:of\s+)?(\d+\.?\d*)",
+        r"threshold\s+(?:of\s+)?(\d+\.?\d*)",
+        r"cutoff\s+(?:of\s+)?(\d+\.?\d*)"
+    ]
+    
+    message = message.lower().strip()
+    
+    for pattern in patterns:
+        match = re.search(pattern, message)
+        if match:
+            try:
+                threshold = float(match.group(1))
+                if 0 <= threshold <= 1:
+                    return threshold
+            except ValueError:
+                continue
+    
+    return None
+
+def test_literature_query_detection():
+    """Test cases for literature query detection."""
+    test_cases = [
+        # Positive cases
+        ("What is known about gene regulation?", True, "gene regulation"),
+        ("Find papers about CRISPR", True, "CRISPR"),
+        ("Search for articles related to metabolic pathways", True, "metabolic pathways"),
+        ("Tell me about the research on bacterial growth", True, "bacterial growth"),
+        ("What papers discuss protein folding", True, "protein folding"),
+        ("Look for literature about DNA repair mechanisms", True, "DNA repair mechanisms"),
+        ("Show me research on synthetic biology", True, "synthetic biology"),
+        
+        # Negative cases
+        ("Plot temperature vs time", False, None),
+        ("Create a heatmap", False, None),
+        ("What is the average value?", False, None),
+        ("Execute the query", False, None),
+        ("Convert to dataset", False, None)
+    ]
+    
+    results = []
+    for message, expected_is_lit, expected_query in test_cases:
+        is_lit, query = is_literature_query(message)
+        passed = is_lit == expected_is_lit and (query == expected_query if expected_query else True)
+        results.append({
+            'message': message,
+            'expected': (expected_is_lit, expected_query),
+            'got': (is_lit, query),
+            'passed': passed
+        })
+    
+    return results
+
+def test_threshold_extraction():
+    """Test cases for threshold extraction."""
+    test_cases = [
+        ("Use threshold 0.3", 0.3),
+        ("Set cutoff to 0.7", 0.7),
+        ("Apply a threshold of 0.5", 0.5),
+        ("threshold 0.1", 0.1),
+        ("With score 0.8", 0.8),
+        ("Use threshold 1.5", None),  # Invalid - above 1
+        ("Set cutoff to -0.1", None),  # Invalid - below 0
+        ("No threshold here", None),
+        ("Use other settings", None)
+    ]
+    
+    results = []
+    for message, expected in test_cases:
+        got = extract_threshold_from_message(message)
+        passed = got == expected
+        results.append({
+            'message': message,
+            'expected': expected,
+            'got': got,
+            'passed': passed
+        })
+    
+    return results
+
 if __name__ == '__main__':
+    # Run tests if in development
+    if os.getenv('FLASK_ENV') == 'development':
+        print("\nTesting literature query detection:")
+        for result in test_literature_query_detection():
+            print(f"Message: {result['message']}")
+            print(f"Expected: {result['expected']}, Got: {result['got']}")
+            print(f"Passed: {result['passed']}\n")
+            
+        print("\nTesting threshold extraction:")
+        for result in test_threshold_extraction():
+            print(f"Message: {result['message']}")
+            print(f"Expected: {result['expected']}, Got: {result['got']}")
+            print(f"Passed: {result['passed']}\n")
+    
+    # Start the app
     app.run_server(debug=True, host='0.0.0.0', port=8051)
