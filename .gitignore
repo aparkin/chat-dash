@@ -5,6 +5,9 @@ ENV/
 
 # Temporary files
 utilities/temp_batch/
+tmp.json
+*_debug.json
+debug_*.py
 
 # Python
 __pycache__/
