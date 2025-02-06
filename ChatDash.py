@@ -487,12 +487,21 @@ def create_system_message(dataset_info: List[Dict[str, Any]],
                          database_structure: Optional[Dict] = None,
                          weaviate_results: Optional[Dict] = None) -> str:
     """Create system message with context from datasets, database, and literature."""
+    print("\n=== System Message Creation Debug ===")
+    print(f"Database structure type: {type(database_structure)}")
+    if database_structure:
+        try:
+            first_table = next(iter(database_structure.items()))
+            print(f"First table entry: {first_table[0]} (type: {type(first_table[0])})")
+            print(f"First table info: {first_table[1]}")
+        except Exception as e:
+            print(f"Error inspecting database structure: {str(e)}")
+
     base_message = "You are a data analysis assistant with access to:"
 
     # Track available data sources
     has_datasets = bool(dataset_info)
     has_database = bool(database_structure)
-    # Only consider literature available if we have a Weaviate connection
     has_literature = True  # We always have access to literature search through Weaviate
     has_literature_results = bool(weaviate_results and weaviate_results.get('unified_results'))
 
@@ -508,15 +517,85 @@ def create_system_message(dataset_info: List[Dict[str, Any]],
     if has_database:
         base_message += "\n\nConnected Database Tables:"
         for table, info in database_structure.items():
-            # Handle columns that might be dictionaries
-            columns = []
+            # Add table info
+            base_message += f"\n\n{table} ({info['row_count']} rows)"
+            
+            # Add column details
+            base_message += "\nColumns:"
             for col in info['columns']:
-                if isinstance(col, dict):
-                    col_name = col.get('name', str(col))
-                    columns.append(col_name)
-                else:
-                    columns.append(str(col))
-            base_message += f"\n- {table}: {info['row_count']} rows, columns: {', '.join(columns)}"
+                constraints = []
+                if col['pk']: constraints.append("PRIMARY KEY")
+                if col['notnull']: constraints.append("NOT NULL")
+                if col['default']: constraints.append(f"DEFAULT {col['default']}")
+                constraint_str = f" ({', '.join(constraints)})" if constraints else ""
+                base_message += f"\n  - {col['name']}: {col['type']}{constraint_str}"
+            
+            # Add foreign key relationships
+            if info['foreign_keys']:
+                base_message += "\nForeign Keys:"
+                for fk in info['foreign_keys']:
+                    base_message += f"\n  - {fk['from']} → {fk['table']}.{fk['to']}"
+        
+        # Enhanced SQL Guidelines
+        base_message += "\n\nSQL Query Guidelines:"
+        
+        # 1. Safety and Compatibility
+        base_message += "\n\n1. Query Safety and Compatibility:"
+        base_message += "\n   - Use ONLY SQLite-compatible syntax"
+        base_message += "\n   - SQLite limitations to be aware of:"
+        base_message += "\n     * NO SIMILAR TO pattern matching (use LIKE or GLOB instead)"
+        base_message += "\n     * NO FULL OUTER JOIN (use LEFT/RIGHT JOIN)"
+        base_message += "\n     * NO WINDOW FUNCTIONS before SQLite 3.25"
+        base_message += "\n     * NO stored procedures or functions"
+        base_message += "\n   - NO database modifications (INSERT/UPDATE/DELETE/DROP/ALTER/CREATE)"
+        base_message += "\n   - NO destructive or resource-intensive operations"
+        base_message += "\n   - Ensure proper table/column name quoting"
+        base_message += "\n   - IMPORTANT: SQL queries can ONLY be run against the connected database tables listed above"
+        base_message += "\n   - Datasets (if any are loaded) cannot be queried with SQL - they are separate from the database"
+        
+        # 2. User SQL Handling
+        base_message += "\n\n2. When User Provides SQL Code:"
+        base_message += "\n   - Validate for safety and SQLite compatibility"
+        base_message += "\n   - If safe and valid:"
+        base_message += "\n     * Use it as your primary (original) suggestion"
+        base_message += "\n     * Explain what it does"
+        base_message += "\n     * Suggest improvements as alternative queries"
+        base_message += "\n   - If unsafe or invalid:"
+        base_message += "\n     * Explain the specific issues"
+        base_message += "\n     * Provide a safe alternative as primary suggestion"
+        base_message += "\n     * Include the user's query as a comment for reference"
+        
+        # 3. Query Response Format
+        base_message += "\n\n3. Query Response Format:"
+        base_message += "\n   Always structure responses as follows:"
+        base_message += "\n   a) Primary Query (Original):"
+        base_message += "\n   ```sql"
+        base_message += "\n   -- Purpose: Clear description of query goal"
+        base_message += "\n   -- Tables: List of tables used"
+        base_message += "\n   -- Assumptions: Any important assumptions"
+        base_message += "\n   SELECT ... -- Your SQL here"
+        base_message += "\n   ```"
+        base_message += "\n   b) Alternative Queries (if relevant):"
+        base_message += "\n   ```sql"
+        base_message += "\n   -- Improvement: Explain how this improves on original"
+        base_message += "\n   SELECT ... -- Alternative SQL"
+        base_message += "\n   ```"
+        base_message += "\n   Note: Query IDs will be added automatically by the system. Do not include them in your response."
+        
+        # 4. Query Best Practices
+        base_message += "\n\n4. Query Best Practices:"
+        base_message += "\n   - Use explicit column names instead of SELECT *"
+        base_message += "\n   - Include appropriate WHERE clauses to limit results"
+        base_message += "\n   - Use meaningful table aliases in JOINs"
+        base_message += "\n   - Add comments for complex logic"
+        base_message += "\n   - Consider performance with large tables"
+        
+        # 5. Execution Instructions
+        base_message += "\n\n5. Query Execution:"
+        base_message += "\n   Users can execute queries using:"
+        base_message += '\n   - "execute." to run the primary (original) query'
+        base_message += '\n   - "execute query_ID" to run a specific query'
+        base_message += '\n   - "convert query_ID to dataset" to save results'
 
     # Add literature information
     if has_literature_results:
@@ -550,9 +629,22 @@ def create_system_message(dataset_info: List[Dict[str, Any]],
     # Add instructions for handling different types of queries
     base_message += "\n\nWhen responding to queries:"
     
+    # Add knowledge retrieval instructions first
+    base_message += "\n\nKnowledge Integration:"
+    base_message += "\n1. First, provide relevant background knowledge from your training:"
+    base_message += "\n   - Explain key concepts, terminology, and relationships"
+    base_message += "\n   - Describe standard methodologies or approaches"
+    base_message += "\n   - Highlight important considerations or limitations"
+    base_message += "\n2. Then suggest how to explore this knowledge using available data sources:"
+    base_message += "\n   - Identify relevant fields or patterns to search for"
+    base_message += "\n   - Propose specific analyses or comparisons"
+    base_message += "\n   - Structure suggestions to help formulate targeted queries"
+    
     if has_datasets:
         base_message += "\n- If the query relates to the available datasets, analyze that data"
         base_message += "\n- If you find relevant information in the datasets, include it in your response"
+        base_message += "\n- Remember: Datasets are separate from the database and cannot be queried using SQL"
+        base_message += "\n- To analyze datasets, use the available visualization and analysis tools"
     
     if has_database:
         base_message += "\n- If you recognize a SQL query, analyze it and suggest improvements if needed"
@@ -561,7 +653,8 @@ def create_system_message(dataset_info: List[Dict[str, Any]],
         base_message += "\n- DO NOT claim to have run queries unless the user has explicitly executed them"
         base_message += "\n- Ensure all SQL queries are valid for SQLite and don't use extended features"
     else:
-        base_message += "\n- DO NOT suggest SQL queries as no database is connected"
+        base_message += "\n- The database is not connected - DO NOT suggest or reference SQL queries"
+        base_message += "\n- Focus on other available data sources and general knowledge"
     
     if has_literature:
         base_message += "\n- You have access to a scientific literature database through Weaviate"
@@ -714,7 +807,11 @@ def validate_sql_query(sql: str, db_path: str) -> tuple[bool, str, dict]:
     """
     try:
         # 1. Basic safety checks
-        sql_lower = sql.lower().strip()
+        
+        # Remove SQL comments before checking for write operations
+        sql_no_comments = re.sub(r'--.*$', '', sql, flags=re.MULTILINE)  # Remove single line comments
+        sql_no_comments = re.sub(r'/\*.*?\*/', '', sql_no_comments, flags=re.DOTALL)  # Remove multi-line comments
+        sql_lower = sql_no_comments.lower().strip()
         
         # Check for write operations
         write_operations = ['insert', 'update', 'delete', 'drop', 'alter', 'create']
@@ -1175,7 +1272,7 @@ def validate_dataset(df: pd.DataFrame, filename: str) -> tuple[bool, str]:
     [Output('chat-history', 'children'),
      Output('chat-input', 'value', allow_duplicate=True),
      Output('chat-store', 'data'),
-     Output('dataset-tabs', 'active_tab', allow_duplicate=True),
+     Output('dataset-tabs', 'active_tab', allow_duplicate=True),  # Fix hyphen to underscore
      Output('viz-state-store', 'data'),
      Output('chat-loading-output', 'children', allow_duplicate=True)],
     [Input('send-button', 'n_clicks')],
@@ -1185,139 +1282,136 @@ def validate_dataset(df: pd.DataFrame, filename: str) -> tuple[bool, str]:
      State('datasets-store', 'data'),
      State('selected-dataset-store', 'data'),
      State('database-state', 'data'),           
-     State('database-structure-store', 'data')],
+     State('database-structure-store', 'data'),
+     State('successful-queries-store', 'data')],  # Add successful_queries store
     prevent_initial_call='initial_duplicate'
 )
-def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, selected_dataset, database_state, database_structure_store):
-    """Process chat messages and handle plot requests."""
+def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, selected_dataset, database_state, database_structure_store, successful_queries):
+    """Process chat messages and handle various command types."""
     try:
         if not input_value:
-            return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
-        
-        print("\n=== Chat Message Debug ===")
-        print(f"Input message: {input_value}")
-        
-        chat_history = chat_history or []
-        # Debug: Check initial chat history
-        print("\nInitial chat history:")
-        for msg in chat_history:
-            print(f"Role: {msg.get('role')}, Content type: {type(msg.get('content'))}")
+            return (dash.no_update,) * 6
             
-        chat_history.append({'role': 'user', 'content': input_value.strip()})
-        
-        # Check for literature query
-        is_lit, query = is_literature_query(input_value)
-        print(f"\nLiterature query check: is_lit={is_lit}, query='{query}'")
-        
-        # Prepare dataset information for the system message
-        dataset_info = []
-        if datasets:
-            print("\nProcessing datasets:")
-            for name, dataset in datasets.items():
-                print(f"Dataset: {name}")
-                df = pd.DataFrame(dataset['df'])
-                info = {
-                    'name': name,
-                    'rows': len(df),
-                    'columns': list(df.columns),
-                    'metadata': dataset.get('metadata', {}),
-                    'selected': name == selected_dataset
-                }
-                dataset_info.append(info)
-        
-        # Handle literature query
-        weaviate_results = None
-        if is_lit:
-            print(f"\nExecuting literature query: '{query}'")
-            try:
-                weaviate_results = execute_weaviate_query(query, min_score=0.1)
-                print(f"Got Weaviate results: {bool(weaviate_results and weaviate_results.get('unified_results'))}")
-                if weaviate_results and weaviate_results.get('unified_results'):
-                    print(f"Found {len(weaviate_results['unified_results'])} results")
-                    
-                    # Write raw results to file for debugging
-                    print("\nWriting raw Weaviate results to weaviate_debug.json")
-                    with open('weaviate_debug.json', 'w') as f:
-                        json.dump(weaviate_results, f, indent=2, default=str)
-                    
-                    # Test both transformations
-                    print("\n=== Testing Original Transform ===")
-                    df_original = transform_weaviate_results(weaviate_results)
-                    print(f"Original DataFrame shape: {df_original.shape}")
-                    print("Original columns:", df_original.columns.tolist())
-                    
-                    print("\n=== Testing New Transform ===")
-                    df_new = transform_weaviate_results_v2(weaviate_results)
-                    
-                    chat_history[-1]['pending_literature_query'] = query
-                else:
-                    print("No results found in literature query")
-            except Exception as e:
-                print(f"Error in literature query: {str(e)}")
-                print(f"Error traceback: {traceback.format_exc()}")
-                weaviate_results = {'error': str(e)}
+        chat_history = chat_history or []
+        current_message = {'role': 'user', 'content': input_value.strip()}
+        chat_history.append(current_message)
         
         # Create system message with all available context
-        print("\nCreating system message...")
         system_message = create_system_message(
-            dataset_info,
-            search_query=input_value if 'find' in input_value.lower() or 'search' in input_value.lower() else None,
-            database_structure=database_structure_store,
-            weaviate_results=weaviate_results
+            dataset_info=[{
+                'name': name,
+                'rows': len(pd.DataFrame(data['df'])),
+                'columns': list(pd.DataFrame(data['df']).columns),
+                'selected': name == selected_dataset
+            } for name, data in datasets.items()] if datasets else [],
+            database_structure=database_structure_store
         )
-        print("System message created")
         
-        # Debug: Check message list before API call
-        messages = [
-            {'role': 'system', 'content': 'You are a data analysis assistant. Please help me analyze my data.'},
-            {'role': 'system', 'content': str(system_message)},
-            *[{'role': msg['role'], 'content': str(msg['content'])}
-                for msg in chat_history[-5:]]
-        ]
-        print("\nMessage list for API:")
-        for msg in messages:
-            print(f"Role: {msg['role']}, Content type: {type(msg['content'])}")
-
-        try:
-            print("\nMaking API call...")
+        # Smart context selection
+        def get_relevant_context(current_msg: dict, history: list, max_context: int = 6) -> list:
+            """Select relevant context messages, preserving order and relationships."""
+            context = []
+            # Always include the current message
+            context.append(current_msg)
+            
+            # Look backwards through history for relevant messages
+            for msg in reversed(history[:-1]):  # Exclude current message
+                if len(context) >= max_context:
+                    break
+                    
+                # Check relevance based on content
+                content = msg['content'].lower()
+                current_content = current_msg['content'].lower()
+                
+                # Always include the immediate previous message
+                if len(context) == 1:
+                    context.insert(0, msg)
+                    continue
+                
+                # Include messages with SQL blocks
+                if '```sql' in content:
+                    context.insert(0, msg)
+                    continue
+                    
+                # Include messages that seem related by content
+                # Look for shared significant terms (excluding common words)
+                current_terms = set(re.findall(r'\b\w+\b', current_content))
+                msg_terms = set(re.findall(r'\b\w+\b', content))
+                shared_terms = current_terms & msg_terms
+                if len(shared_terms) >= 2:  # At least 2 significant shared terms
+                    context.insert(0, msg)
+                    
+            return context
+        
+        # Handle search queries
+        if is_search_query(input_value):
+            print("\n=== Processing Search Query ===")
+            search_results = search_all_sources(input_value)
+            
+            # Add search results to chat history
+            search_summary = format_search_results(search_results)
+            chat_history.append({'role': 'assistant', 'content': search_summary})
+            
+            # Get LLM interpretation with relevant context
+            context = get_relevant_context(current_message, chat_history)
+            messages = [
+                {'role': 'system', 'content': system_message},
+                *[{'role': msg['role'], 'content': str(msg['content'])} for msg in context],
+                {'role': 'assistant', 'content': search_summary},
+                {'role': 'user', 'content': "Please analyze these results and suggest relevant SQL queries if appropriate."}
+            ]
+            
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
-                temperature=0.7,
-                max_tokens=4096
+                temperature=0.4,
+                max_tokens=8192
             )
-
+            
             ai_response = response.choices[0].message.content
-            print("API response received")
             
-            # Debug: Check chat history before final append
-            print("\nFinal chat history check:")
-            for msg in chat_history:
-                print(f"Role: {msg.get('role')}, Content type: {type(msg.get('content'))}")
+            # Process SQL blocks if present
+            if '```sql' in ai_response.lower():
+                ai_response = add_query_ids_to_response(ai_response)
             
-            chat_history.append({
-                'role': 'assistant',
-                'content': str(ai_response)
-            })
+            chat_history.append({'role': 'assistant', 'content': ai_response})
             
-            # Debug: Verify final message batch
-            elements = create_chat_elements_batch(chat_history)
-            print("\nCreated chat elements:", len(elements))
-
-        except Exception as e:
-            error_message = f"Error communicating with AI: {str(e)}"
-            print(f"\nAPI Error details: {str(e)}")
-            chat_history.append({
-                'role': 'system',
-                'content': error_message
-            })
+        else:
+            # Handle non-search queries
+            context = get_relevant_context(current_message, chat_history)
+            messages = [
+                {'role': 'system', 'content': system_message},
+                *[{'role': msg['role'], 'content': str(msg['content'])} for msg in context]
+            ]
             
-        return create_chat_elements_batch(chat_history), '', chat_history, dash.no_update, dash.no_update, dash.no_update
-    
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.4,
+                max_tokens=8192
+            )
+            
+            ai_response = response.choices[0].message.content
+            
+            # Process SQL blocks if present
+            if '```sql' in ai_response.lower():
+                ai_response = add_query_ids_to_response(ai_response)
+            
+            chat_history.append({'role': 'assistant', 'content': ai_response})
+        
+        return (
+            create_chat_elements_batch(chat_history),
+            '',
+            chat_history,
+            dash.no_update,
+            dash.no_update,
+            ""
+        )
+        
     except Exception as e:
-        print(f"\nError in handle_chat_message: {str(e)}")
-        print("Error traceback:", traceback.format_exc())
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        print(f"Error in handle_chat_message: {str(e)}")
+        print(traceback.format_exc())
+        return (dash.no_update,) * 6
 
 def get_weaviate_client():
     """Get or create Weaviate client instance."""
@@ -2008,7 +2102,7 @@ def update_dataset_stats(datasets):
     [Output('chat-history', 'children', allow_duplicate=True),
      Output('chat-input', 'value', allow_duplicate=True),
      Output('chat-store', 'data', allow_duplicate=True),
-     Output('dataset-tabs', 'active_tab', allow_duplicate=True),
+     Output('dataset-tabs', 'active_tab', allow_duplicate=True),  # Fix hyphen to underscore
      Output('viz-state-store', 'data', allow_duplicate=True),
      Output('chat-loading-output', 'children', allow_duplicate=True),
      Output('successful-queries-store', 'data', allow_duplicate=True),
@@ -2023,7 +2117,7 @@ def update_dataset_stats(datasets):
      State('datasets-store', 'data')],
     prevent_initial_call='initial_duplicate'
 )
-def execute_confirmed_query(input_value, n_clicks, chat_history, db_state, db_structure, successful_queries, datasets):
+def execute_confirmed_query(input_value, n_clicks, chat_history, database_state, database_structure_store, successful_queries, datasets):
     """Process chat commands related to SQL query execution and dataset conversion.
 
     This function handles three main types of operations:
@@ -2035,8 +2129,8 @@ def execute_confirmed_query(input_value, n_clicks, chat_history, db_state, db_st
         input_value (str): The user's chat input message
         n_clicks (int): Number of times send button clicked (for triggering)
         chat_history (list): List of chat message dictionaries with 'role' and 'content'
-        db_state (dict): Current database connection state including path
-        db_structure (dict): Database schema information
+        database_state (dict): Current database connection state including path
+        database_structure_store (dict): Database schema information
         successful_queries (dict): Store of previously executed queries with metadata
         datasets (dict): Currently loaded datasets in browser memory
 
@@ -2069,25 +2163,23 @@ def execute_confirmed_query(input_value, n_clicks, chat_history, db_state, db_st
         - Memory-efficient storage format
     """
     if not input_value:
-        return (
-            dash.no_update,  # chat-history
-            dash.no_update,  # chat-input
-            dash.no_update,  # chat-store
-            dash.no_update,  # dataset-tabs
-            dash.no_update,  # viz-state-store
-            dash.no_update,  # chat-loading-output
-            dash.no_update,  # successful-queries-store
-            dash.no_update,  # datasets-store
-            dash.no_update   # dataset-list
-        )
-        
-    # Check if this is a complete execution command
-    input_lower = input_value.lower().strip()
-
+        return (dash.no_update,) * 9
+    
+    # Initialize stores safely
+    successful_queries = successful_queries or {}
+    chat_history = chat_history or []
+    datasets = datasets or {}
+    
+    #print(f"Current store state:")
+    #print(f"- Successful queries: {len(successful_queries)} stored")
+    #print(f"- Chat history: {len(chat_history)} messages")
+    #print(f"- Datasets: {len(datasets)} loaded")
+    
     # Check for dataset conversion request
-    convert_match = re.search(r'convert\s+(query_\d{8}_\d{6}(?:_original|_alt\d+))\s+to\s+dataset', input_lower)
+    convert_match = re.search(r'convert\s+(query_\d{8}_\d{6}(?:_original|_alt\d+))\s+to\s+dataset', input_value.lower().strip())
     if convert_match:
         query_id = convert_match.group(1)
+        print(f"\nProcessing dataset conversion request for query: {query_id}")
         
         # Add command to chat history
         chat_history.append({
@@ -2096,19 +2188,33 @@ def execute_confirmed_query(input_value, n_clicks, chat_history, db_state, db_st
         })
         
         # Check if query exists in store
-        if not successful_queries or query_id not in successful_queries:
+        if query_id not in successful_queries:
+            print(f"Error: Query {query_id} not found in store")
             chat_history.append({
                 'role': 'assistant',
                 'content': f"❌ Query {query_id} not found in history. Please execute the query first."
             })
-            return create_chat_elements_batch(chat_history), '', chat_history, dash.no_update, dash.no_update, "", dash.no_update, dash.no_update
+            return (
+                create_chat_elements_batch(chat_history),  # chat-history
+                '',                                        # chat-input
+                chat_history,                              # chat-store
+                dash.no_update,                           # dataset-tabs
+                dash.no_update,                           # viz-state-store
+                "",                                       # chat-loading-output
+                successful_queries,                       # successful-queries-store
+                dash.no_update,                           # datasets-store
+                dash.no_update                            # dataset-list
+            )
             
         try:
+            print(f"Converting query {query_id} to dataset...")
             # Get stored query details
             stored_query = successful_queries[query_id]
             
             # Execute query to get fresh data
-            df, metadata, _ = execute_sql_query(stored_query['sql'], db_state['path'])
+            print("Executing query to get fresh data...")
+            df, metadata, _ = execute_sql_query(stored_query['sql'], database_state['path'])
+            print(f"Query executed successfully: {len(df)} rows retrieved")
             
             # Create dataset name (avoid duplicates)
             base_name = f"{query_id}"
@@ -2117,9 +2223,11 @@ def execute_confirmed_query(input_value, n_clicks, chat_history, db_state, db_st
             while dataset_name in datasets:
                 dataset_name = f"{base_name}_{counter}"
                 counter += 1
+            print(f"Using dataset name: {dataset_name}")
             
             # Generate profile report
             try:
+                print("Generating profile report...")
                 profile = ProfileReport(
                     df,
                     minimal=True,
@@ -2131,25 +2239,33 @@ def execute_confirmed_query(input_value, n_clicks, chat_history, db_state, db_st
                     samples=None
                 )
                 profile_html = profile.to_html()
+                print("Profile report generated successfully")
             except Exception as e:
-                print(f"Error generating profile report: {str(e)}")
+                print(f"Warning: Profile report generation failed: {str(e)}")
                 profile_html = None
             
             # Create dataset with special metadata
-            datasets = datasets or {}
             datasets[dataset_name] = {
                 'df': df.reset_index().to_dict('records'),
                 'metadata': {
                     'filename': f"{dataset_name}.csv",
                     'source': f"Database query: {query_id}",
-                    'database': db_state['path'],
+                    'database': database_state['path'],
                     'sql': stored_query['sql'],
                     'execution_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'rows': len(df),
                     'columns': [df.index.name or 'index'] + list(df.columns)
                 },
-                'profile_report': profile_html  # Add the profile report
+                'profile_report': profile_html
             }
+            print(f"Dataset '{dataset_name}' created successfully")
+            
+            # Add text search indexing for the new dataset
+            try:
+                text_searcher.update_dataset(dataset_name, df)
+                print(f"Text search index updated for dataset '{dataset_name}'")
+            except Exception as e:
+                print(f"Warning: Failed to update text search index: {str(e)}")
             
             # Create success message
             chat_history.append({
@@ -2160,135 +2276,145 @@ def execute_confirmed_query(input_value, n_clicks, chat_history, db_state, db_st
                           f"- Source: Query {query_id}"
             })
             
-            # Return with updated datasets
+            # Create updated dataset list
             dataset_list = [create_dataset_card(name, data) for name, data in datasets.items()]
-            return create_chat_elements_batch(chat_history), '', chat_history, dash.no_update, dash.no_update, "", dash.no_update, datasets, dataset_list
+            print("Dataset list updated")
+            
+            return (
+                create_chat_elements_batch(chat_history),  # chat-history
+                '',                                        # chat-input
+                chat_history,                              # chat-store
+                dash.no_update,                           # dataset-tabs
+                dash.no_update,                           # viz-state-store
+                "",                                       # chat-loading-output
+                successful_queries,                       # successful-queries-store
+                datasets,                                 # datasets-store
+                dataset_list                              # dataset-list
+            )
             
         except Exception as e:
+            print(f"Error: Dataset conversion failed: {str(e)}")
             chat_history.append({
                 'role': 'system',
                 'content': f"❌ Error converting query to dataset: {str(e)}"
             })
-            return create_chat_elements_batch(chat_history), '', chat_history, dash.no_update, dash.no_update, "", dash.no_update, dash.no_update, dash.no_update
-
-    # Only execute if:
-    # 1. Starts with execute/run/query AND
-    # 2. Is a complete command (has punctuation or additional text)
-    is_execution_command = any(input_lower.startswith(cmd) for cmd in ['execute', 'run', 'query'])
+            return (
+                create_chat_elements_batch(chat_history),  # chat-history
+                '',                                        # chat-input
+                chat_history,                              # chat-store
+                dash.no_update,                           # dataset-tabs
+                dash.no_update,                           # viz-state-store
+                "",                                       # chat-loading-output
+                successful_queries,                       # successful-queries-store
+                dash.no_update,                           # datasets-store
+                dash.no_update                            # dataset-list
+            )
     
-    # Check for either:
-    # 1. Simple command with punctuation (e.g., "execute.")
+    # Handle query execution
+    input_lower = input_value.lower().strip()
+    
+    # Check execution command type
     is_simple_command = (
-        len(input_lower.split()) == 1 and  # Single word
-        any(input_lower.endswith(char) for char in ['.', '!'])  # Ends with punctuation
+        input_lower.startswith(('execute', 'run', 'query')) and
+        len(input_lower.split()) == 1 and
+        any(input_lower.endswith(char) for char in ['.', '!'])
     )
     
-    # 2. Command with query ID
     query_match = re.search(r'^execute\s+query_\d{8}_\d{6}(_original|_alt\d+)\b', input_lower)
     is_query_reference = bool(query_match)
     
-    if not (is_execution_command and (is_simple_command or is_query_reference)):
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+    if not (is_simple_command or is_query_reference):
+        return (dash.no_update,) * 9
         
-    # Find the appropriate SQL query
-    sql_query = None
+    print("\nProcessing query execution command...")
+    print(f"- Simple command: {is_simple_command}")
+    print(f"- Query reference: {is_query_reference}")
     
-    # Add command to chat history first
+    # Add command to chat history
     chat_history.append({
         'role': 'user',
         'content': input_value
     })
     
-    # Extract query ID if this is a reference query
-    target_query_id = None
-    if is_query_reference:
-        # More strict pattern that requires the full string to match
-        query_match = re.search(r'^execute\s+query_\d{8}_\d{6}(_original|_alt\d+)\b', input_lower)
-        if query_match:
-            target_query_id = input_lower[8:].strip()  # Remove 'execute ' prefix
-        else:
-            print("\nInvalid query ID format")
-            chat_history.append({
-                'role': 'assistant',
-                'content': "Invalid query ID format. Expected format: query_YYYYMMDD_HHMMSS_original or query_YYYYMMDD_HHMMSS_altN where N is a number."
-            })
-            return create_chat_elements_batch(chat_history), '', chat_history, dash.no_update, dash.no_update, "", dash.no_update, dash.no_update, dash.no_update
-    
-    # Search chat history for matching query
+    # Find the query to execute
+    sql_query = None
     found_id = None
-    for msg in reversed(chat_history):
-        if msg['role'] == 'assistant' and '```sql' in msg['content'].lower():
-            content = msg['content']
-            
-            # Find all SQL blocks in the message
-            current_pos = 0
-            while True:
-                # Find start of SQL block
-                sql_start = content.lower().find('```sql', current_pos)
-                if sql_start == -1:
+    
+    if is_query_reference:
+        target_query_id = input_lower[8:].strip()  # Remove 'execute ' prefix
+        print(f"\nLooking for specific query: {target_query_id}")
+        # Search for specific query ID
+        for msg in reversed(chat_history):
+            if msg['role'] == 'assistant' and '```sql' in msg['content'].lower():
+                content = msg['content']
+                for match in re.finditer(r'```sql\s*(.*?)```', content, re.DOTALL):
+                    block = match.group(1).strip()
+                    id_match = re.search(r'--\s*Query ID:\s*((query_\d{8}_\d{6})(_original|_alt\d+))\b', block)
+                    if id_match and id_match.group(1) == target_query_id:
+                        found_id = target_query_id
+                        sql_query = '\n'.join(
+                            line for line in block.split('\n')
+                            if not line.strip().startswith('-- Query ID:')
+                        ).strip()
+                        print(f"Found matching query with ID: {found_id}")
+                        break
+                if sql_query:
                     break
-                    
-                # Find end of SQL block
-                sql_end = content.find('```', sql_start + 6)
-                if sql_end == -1:
+    else:
+        print("\nLooking for most recent original query...")
+        # Find most recent original query
+        for msg in reversed(chat_history):
+            if msg['role'] == 'assistant' and '```sql' in msg['content'].lower():
+                content = msg['content']
+                for match in re.finditer(r'```sql\s*(.*?)```', content, re.DOTALL):
+                    block = match.group(1).strip()
+                    id_match = re.search(r'--\s*Query ID:\s*((query_\d{8}_\d{6})(_original))\b', block)
+                    if id_match:
+                        found_id = id_match.group(1)
+                        sql_query = '\n'.join(
+                            line for line in block.split('\n')
+                            if not line.strip().startswith('-- Query ID:')
+                        ).strip()
+                        print(f"Found original query with ID: {found_id}")
+                        break
+                if sql_query:
                     break
-                    
-                # Extract the SQL block
-                block = content[sql_start + 6:sql_end].strip()
-                
-                # Look for Query ID in this block with matching pattern
-                id_match = re.search(r'--\s*Query ID:\s*((query_\d{8}_\d{6})(_original|_alt\d+))\b', block)
-                if id_match:
-                    current_id = id_match.group(1)
-                    
-                    # Check if this is the query we want
-                    if is_query_reference:
-                        is_match = (current_id == target_query_id)
-                    else:
-                        is_match = '_original' in current_id
-                    
-                    if is_match:
-                        # Extract SQL (excluding the Query ID line)
-                        found_id = current_id
-                        sql_lines = []
-                        for line in block.split('\n'):
-                            if not line.strip().startswith('-- Query ID:'):
-                                sql_lines.append(line)
-                        sql_query = '\n'.join(sql_lines).strip()
-                        break  # Found our match, no need to check other blocks
-                
-                current_pos = sql_end + 3
-            
-            if sql_query:  # Only break message loop if we found our query
-                break
-
-    print(f"\nSearch complete - Query found: {sql_query is not None}")
-
+    
     if not sql_query:
+        print("No matching SQL query found")
         chat_history.append({
             'role': 'assistant',
             'content': "No matching SQL query found in chat history."
         })
-        return create_chat_elements_batch(chat_history), '', chat_history, dash.no_update, dash.no_update, "", dash.no_update, dash.no_update, dash.no_update
-        
-    # Clean the query string
-    sql_query = sql_query.strip()  # Remove leading/trailing whitespace
-    sql_query = '\n'.join(line.strip() for line in sql_query.splitlines())  # Clean line endings
+        return (
+            create_chat_elements_batch(chat_history),  # chat-history
+            '',                                        # chat-input
+            chat_history,                              # chat-store
+            dash.no_update,                           # dataset-tabs
+            dash.no_update,                           # viz-state-store
+            "",                                       # chat-loading-output
+            successful_queries,                       # successful-queries-store
+            dash.no_update,                           # datasets-store
+            dash.no_update                            # dataset-list
+        )
 
     try:
+        print(f"\nExecuting SQL query...")
+        print(f"Query:\n{sql_query}")
+        
         # Execute the query
-        results, metadata, preview = execute_sql_query(sql_query, db_state['path'])
-
-        # Store query details (but not results)
-        successful_queries = successful_queries or {}
-        successful_queries = dash.callback_context.states['successful-queries-store.data'] or {}
+        results, metadata, preview = execute_sql_query(sql_query, database_state['path'])
+        print(f"Query executed successfully: {metadata['rows']} rows returned")
+        
+        # Store successful query
         successful_queries[found_id] = store_successful_query(
             query_id=found_id,
             sql=sql_query,
             metadata=metadata
         )
+        print(f"Query stored with ID: {found_id}")
         
-        # Format results for display
+        # Format response
         response = f"""Query executed successfully!
 
 Results preview:
@@ -2303,15 +2429,40 @@ Execution plan:
 
 Would you like to save these results as a dataset?"""
         
-        chat_history.append({'role': 'assistant', 'content': response})
+        chat_history.append({
+            'role': 'assistant',
+            'content': response
+        })
+        
+        return (
+            create_chat_elements_batch(chat_history),  # chat-history
+            '',                                        # chat-input
+            chat_history,                              # chat-store
+            dash.no_update,                           # dataset-tabs
+            dash.no_update,                           # viz-state-store
+            "",                                       # chat-loading-output
+            successful_queries,                       # successful-queries-store
+            dash.no_update,                           # datasets-store
+            dash.no_update                            # dataset-list
+        )
         
     except Exception as e:
+        print(f"Error executing query: {str(e)}")
         chat_history.append({
             'role': 'system',
             'content': f"Query execution failed: {str(e)}"
         })
-        
-    return create_chat_elements_batch(chat_history), '', chat_history, dash.no_update, dash.no_update, "", successful_queries, dash.no_update, dash.no_update
+        return (
+            create_chat_elements_batch(chat_history),  # chat-history
+            '',                                        # chat-input
+            chat_history,                              # chat-store
+            dash.no_update,                           # dataset-tabs
+            dash.no_update,                           # viz-state-store
+            "",                                       # chat-loading-output
+            successful_queries,                       # successful-queries-store
+            dash.no_update,                           # datasets-store
+            dash.no_update                            # dataset-list
+        )
 
 # Enter key handler - Known limitation: Enter key does not trigger message send
 # This is due to Dash callback chain restrictions. Users must use the Send button.
@@ -3405,6 +3556,60 @@ def refresh_database_list(n_clicks):
     """Refresh the list of available databases."""
     return get_database_files(), None  # Reset dropdown selection
 
+def get_database_structure(db_path: str) -> Dict[str, Any]:
+    """Get structure of SQLite database including tables, columns, and relationships."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Get all tables
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = cursor.fetchall()
+        
+        structure = {}
+        
+        for table in tables:
+            table_name = table[0]
+            
+            # Get column info
+            cursor.execute(f"PRAGMA table_info({table_name});")
+            columns = [{
+                'name': str(col[1]),  # Ensure column name is string
+                'type': str(col[2]),  # Ensure type is string
+                'notnull': bool(col[3]),
+                'pk': bool(col[4]),
+                'default': col[5]
+            } for col in cursor.fetchall()]
+            
+            # Get row count
+            cursor.execute(f"SELECT COUNT(*) FROM {table_name};")
+            row_count = cursor.fetchone()[0]
+            
+            # Get foreign keys
+            cursor.execute(f"PRAGMA foreign_key_list({table_name});")
+            foreign_keys = [{
+                'from': str(fk[3]),  # Ensure key names are strings
+                'to': str(fk[4]),
+                'table': str(fk[2])
+            } for fk in cursor.fetchall()]
+            
+            structure[table_name] = {
+                'columns': columns,
+                'row_count': row_count,
+                'foreign_keys': foreign_keys
+            }
+            
+        conn.close()
+        print(f"\n=== Database Structure Debug ===")
+        print(f"First table structure: {next(iter(structure.items()))}")
+        return structure
+        
+    except Exception as e:
+        print(f"Error getting database structure: {str(e)}")
+        print(traceback.format_exc())
+        return {}
+
+# Update the database connection callback to use this
 @callback(
     [Output('database-state', 'data'),
      Output('database-structure-store', 'data'),
@@ -3416,46 +3621,50 @@ def refresh_database_list(n_clicks):
 )
 def connect_database(n_clicks, db_path, current_state):
     """Handle database connection attempts."""
-    if n_clicks == 0 and current_state is None:
-        return current_state, None, ''
-    
-    if not db_path:
+    if not n_clicks or not db_path:
         return (
             {'connected': False, 'path': None},
             None,
             html.Div('Please select a database', style={'color': 'red'})
         )
     
-    # Check if we're actually switching databases
-    if current_state and current_state.get('path') == db_path:
-        return dash.no_update, dash.no_update, dash.no_update
-    
     try:
-        # Create a single DatabaseManager instance
-        db = DatabaseManager(db_path)
+        # Get detailed database structure
+        print(f"\n=== Connecting to Database ===")
+        print(f"Path: {db_path}")
         
-        # Get database structure first
-        structure = db.get_database_summary()
-        
+        structure = get_database_structure(db_path)
+        if not structure:
+            raise Exception("Could not read database structure")
+            
         # Initialize text search
         print(f"Indexing database: {db_path}")
-        text_searcher = DatabaseTextSearch()
-        text_searcher.index_database(db_path, db)  # Modified to accept db instance
+        global text_searcher_db
+        text_searcher_db = DatabaseTextSearch()
+        text_searcher_db.index_database(db_path)
         print(f"Finished indexing database: {db_path}")
         
-        # Store only serializable data
+        # Store structure in global variable for access
+        global current_database_structure
+        current_database_structure = structure
+        
+        state = {
+            'connected': True,
+            'path': db_path,
+            'has_text_search': True,
+            'structure': structure  # Include structure in state
+        }
+        
+        print(f"Database connected successfully with {len(structure)} tables")
         return (
-            {
-                'connected': True,
-                'path': db_path,
-                'has_text_search': True  # Flag to indicate text search is available
-            },
+            state,
             structure,
             html.Div('Connected successfully', style={'color': 'green'})
         )
         
     except Exception as e:
         print(f"Database connection error: {str(e)}")
+        print(traceback.format_exc())
         return (
             {'connected': False, 'path': None, 'has_text_search': False},
             None,
@@ -3471,9 +3680,10 @@ _text_searcher = None
      Output('database-erd', 'style')],
     [Input('database-structure-store', 'data'),
      Input('database-view-tabs', 'active_tab')],
-    prevent_initial_call=True
+    [State('database-erd', 'children')],  # Add state to track existing ERD
+    prevent_initial_call='initial_duplicate'
 )
-def update_database_views(structure_data, active_tab):
+def update_database_views(structure_data, active_tab, existing_erd):
     """Update both table summary and ERD visualization."""
     # Base style for ERD container
     base_style = {
@@ -3518,29 +3728,69 @@ def update_database_views(structure_data, active_tab):
     
     summary = dcc.Markdown('\n'.join(table_rows))
     
+    # If we're just switching tabs and already have an ERD, reuse it
+    if active_tab == 'tab-erd' and existing_erd is not None:
+        return summary, existing_erd, base_style
+        
     try:
-        # Generate and clean up ERD code
-        mermaid_code = generate_mermaid_erd(structure_data)
-        if mermaid_code.startswith('```mermaid\n'):
-            mermaid_code = mermaid_code[len('```mermaid\n'):]
-        if mermaid_code.endswith('```'):
-            mermaid_code = mermaid_code[:-3]
-        
-        # Create ERD content
-        erd = html.Div([
-            Mermaid(
-                chart=mermaid_code,
-                config={
-                    "securityLevel": "loose",
-                    "er": {
-                        "layoutDirection": "TB",
-                        "entityPadding": 15,
-                        "useMaxWidth": True
+        # Only generate new ERD if we don't have one or structure changed
+        if existing_erd is None or active_tab == 'tab-erd':
+            print("\n=== Generating new ERD ===")
+            # Generate and clean up ERD code
+            mermaid_code = generate_mermaid_erd(structure_data)
+            if mermaid_code.startswith('```mermaid\n'):
+                mermaid_code = mermaid_code[len('```mermaid\n'):]
+            if mermaid_code.endswith('```'):
+                mermaid_code = mermaid_code[:-3]
+            
+            # Create ERD content
+            erd = html.Div([
+                Mermaid(
+                    chart=mermaid_code,
+                    config={
+                        "securityLevel": "loose",
+                        "theme": "default",
+                        "themeVariables": {
+                            "background": "#ffffff",
+                            "primaryColor": "#e0e0e0",
+                            "primaryBorderColor": "#555555",
+                            "lineColor": "#555555",
+                            "textColor": "#000000",
+                            "entityBkgColor": "#ffffff",
+                            "entityBorder": "#555555",
+                            "labelBackground": "#ffffff",
+                            "labelBorder": "#555555",
+                            "nodeBkg": "#ffffff",
+                            "classText": "#000000",
+                            "mainBkg": "#ffffff",
+                            "titleColor": "#000000",
+                            "edgeLabelBackground": "#ffffff",
+                            "clusterBkg": "#ffffff",
+                            "defaultLinkColor": "#555555",
+                            "tertiaryColor": "#ffffff",
+                            "noteTextColor": "#000000",
+                            "noteBkgColor": "#ffffff",
+                            "noteBorderColor": "#555555",
+                            "erd": {
+                                "entityFill": "#ffffff",
+                                "entityBorder": "#333333",
+                                "attributeFill": "#ffffff",
+                                "attributeBorder": "#333333",
+                                "labelColor": "#000000",
+                                "labelBackground": "#ffffff"
+                            }
+                        },
+                        "er": {
+                            "layoutDirection": "TB",
+                            "entityPadding": 15,
+                            "useMaxWidth": True
+                        }
                     }
-                }
-            )
-        ])
-        
+                )
+            ])
+        else:
+            erd = existing_erd
+            
         return summary, erd, base_style
         
     except Exception as e:
@@ -3652,6 +3902,42 @@ def update_weaviate_views(weaviate_state, active_tab):
                     chart=mermaid_code,
                     config={
                         "securityLevel": "loose",
+                        "theme": "default",
+                        "themeVariables": {
+                            "background": "#ffffff",
+                            "primaryColor": "#e0e0e0",
+                            "primaryBorderColor": "#555555",
+                            "lineColor": "#555555",
+                            "textColor": "#000000",
+                            # Add specific ERD theme variables
+                            "entityBkgColor": "#ffffff",
+                            "entityBorder": "#555555",
+                            "labelBackground": "#ffffff",
+                            "labelBorder": "#555555",
+                            "nodeBkg": "#ffffff",
+                            # Class colors
+                            "classText": "#000000",
+                            "mainBkg": "#ffffff",
+                            "titleColor": "#000000",
+                            # Relationship colors
+                            "edgeLabelBackground": "#ffffff",
+                            "clusterBkg": "#ffffff",
+                            "defaultLinkColor": "#555555",
+                            # Additional diagram elements
+                            "tertiaryColor": "#ffffff",
+                            "noteTextColor": "#000000",
+                            "noteBkgColor": "#ffffff",
+                            "noteBorderColor": "#555555",
+                            # ERD-specific overrides
+                            "erd": {
+                                "entityFill": "#ffffff",
+                                "entityBorder": "#333333",
+                                "attributeFill": "#ffffff",
+                                "attributeBorder": "#333333",
+                                "labelColor": "#000000",
+                                "labelBackground": "#ffffff"
+                            }
+                        },
                         "er": {
                             "layoutDirection": "TB",
                             "entityPadding": 15,
@@ -3669,62 +3955,274 @@ def update_weaviate_views(weaviate_state, active_tab):
         return error_msg, html.Div(error_msg, style={'color': 'red'}), base_style
 
 def transform_weaviate_results(json_results: dict) -> pd.DataFrame:
-    """Transform Weaviate JSON results into a structured DataFrame.
+    """Transform Weaviate JSON results into a unified DataFrame with consistent structure.
     
     Args:
-        json_results: Raw JSON results from Weaviate query containing:
+        json_results: Dict containing:
             - query_info: Query parameters and metadata
-            - summary: Collection counts and totals
-            - unified_results: Combined results from all collections
-        
+            - raw_results: Direct hits from collections
+            - unified_results: Unified Article records with cross-references
+            
     Returns:
         pd.DataFrame with columns:
-        - score: Search relevance score
-        - collection: Source collection name
-        - object_id: Weaviate object ID
-        - properties: Dict of object properties
-        - cross_references: Dict of cross-references
-        
-    Note:
-        DataFrame will have query_info and summary stored in df.attrs
+            - score: Search relevance score
+            - id: Record identifier (uuid from raw_results, id from unified_results)
+            - collection: Source collection name
+            - source: Original collection for raw_results, source field for unified
+            - {collection}_{property}: Dynamic property columns
+            - cross_references: JSON string of cross-references (or None)
+            
+        DataFrame.attrs contains:
+            - query_info: Original query parameters
+            - summary: Collection counts and statistics
     """
-    # Define expected columns in desired order
-    columns = ['score', 'collection', 'object_id', 'properties', 'cross_references']
-    
-    # Handle empty results
-    if not json_results:
-        return pd.DataFrame(columns=columns)
-    
-    rows = []
-    
-    # Process unified results
-    if 'unified_results' in json_results:
-        for result in json_results['unified_results']:
-            # Extract core fields
-            row = {
-                'score': result.get('score', 0.0),
-                'collection': result.get('collection', 'unknown'),
-                'object_id': result.get('id', ''),
-                'cross_references': result.get('cross_references', {})
-            }
+    try:
+        print("\n=== Processing Weaviate Results ===")
+        
+        # Initialize empty records list and property tracking
+        records = []
+        all_properties = {}  # {collection: {property_name: data_type}}
+        
+        # Process raw_results first to discover all possible properties
+        raw_results = json_results.get('raw_results', {})
+        print(f"\nProcessing raw results from {len(raw_results)} collections")
+        
+        for collection_name, collection_results in raw_results.items():
+            if collection_name == 'Article':
+                continue  # Skip Articles in raw_results as they'll be handled in unified
+                
+            print(f"\nProcessing collection: {collection_name}")
+            print(f"Found {len(collection_results)} records")
             
-            # All other fields go into properties
-            row['properties'] = {
-                k: v for k, v in result.items() 
-                if k not in ['score', 'collection', 'id', 'cross_references']
-            }
+            # Track properties for this collection
+            all_properties[collection_name] = set()
             
-            rows.append(row)
+            for record in collection_results:
+                # Create base record
+                transformed = {
+                    'score': record.get('score', 0.0),
+                    'id': str(record.get('uuid', '')),
+                    'collection': collection_name,
+                    'source': collection_name,
+                    'cross_references': None  # Raw results don't have cross-references
+                }
+                
+                # Process properties
+                properties = record.get('properties', {})
+                for prop_name, value in properties.items():
+                    column_name = f"{collection_name}_{prop_name}"
+                    transformed[column_name] = value
+                    all_properties[collection_name].add(prop_name)
+                
+                records.append(transformed)
+        
+        # Process unified results (Articles)
+        unified_results = json_results.get('unified_results', [])
+        print(f"\nProcessing {len(unified_results)} unified Article results")
+        
+        if unified_results:
+            all_properties['Article'] = set()
+            
+            for record in unified_results:
+                # Create base record
+                transformed = {
+                    'score': record.get('score', 0.0),
+                    'id': str(record.get('id', '')),
+                    'collection': 'Article',
+                    'source': record.get('source', 'Unknown')
+                }
+                
+                # Process Article properties
+                properties = record.get('properties', {})
+                for prop_name, value in properties.items():
+                    column_name = f"Article_{prop_name}"
+                    transformed[column_name] = value
+                    all_properties['Article'].add(prop_name)
+                
+                # Handle cross-references
+                traced = record.get('traced_elements', {})
+                if traced:
+                    # Convert to simplified format for storage
+                    refs = {}
+                    for ref_collection, elements in traced.items():
+                        if elements:  # Only store non-empty references
+                            refs[ref_collection] = [
+                                {
+                                    'id': str(elem.get('id', '')),
+                                    'score': elem.get('score', 0.0)
+                                } for elem in elements
+                            ]
+                    transformed['cross_references'] = (
+                        json.dumps(refs) if refs else None
+                    )
+                else:
+                    transformed['cross_references'] = None
+                
+                records.append(transformed)
+        
+        # Create DataFrame
+        if not records:
+            print("No results found")
+            empty_df = pd.DataFrame(columns=[
+                'score', 'id', 'collection', 'source', 'cross_references'
+            ])
+            empty_df.attrs['query_info'] = json_results.get('query_info', {})
+            empty_df.attrs['summary'] = {'total_results': 0}
+            return empty_df
+        
+        # Create DataFrame and ensure all columns exist
+        df = pd.DataFrame(records)
+        
+        # Create summary information
+        summary = {
+            'total_results': len(df),
+            'collection_counts': df['collection'].value_counts().to_dict(),
+            'score_range': {
+                'min': df['score'].min(),
+                'max': df['score'].max(),
+                'mean': df['score'].mean()
+            },
+            'property_coverage': {
+                collection: list(props) 
+                for collection, props in all_properties.items()
+            }
+        }
+        
+        # Store metadata
+        df.attrs['query_info'] = json_results.get('query_info', {})
+        df.attrs['summary'] = summary
+        
+        # Sort by score descending
+        df = df.sort_values('score', ascending=False)
+        
+        print("\n=== Results Summary ===")
+        print(f"Total records: {len(df)}")
+        print("\nBy collection:")
+        for collection, count in summary['collection_counts'].items():
+            print(f"- {collection}: {count} records")
+        print(f"\nScore range: {summary['score_range']['min']:.3f} - {summary['score_range']['max']:.3f}")
+        
+        return df
+        
+    except Exception as e:
+        print(f"Error transforming Weaviate results: {str(e)}")
+        print(f"Error traceback: {traceback.format_exc()}")
+        # Return empty DataFrame with error information
+        empty_df = pd.DataFrame(columns=[
+            'score', 'id', 'collection', 'source', 'cross_references'
+        ])
+        empty_df.attrs['query_info'] = json_results.get('query_info', {})
+        empty_df.attrs['summary'] = {'error': str(e)}
+        return empty_df
     
-    # Create DataFrame with columns in specified order and sort by score
-    df = pd.DataFrame(rows, columns=columns)
-    df = df.sort_values('score', ascending=False)
+def format_weaviate_results_preview(df: pd.DataFrame, max_rows: int = 5) -> str:
+    """Generate a formatted preview of Weaviate search results for chat display.
     
-    # Store query info and summary in DataFrame attributes
-    df.attrs['query_info'] = json_results.get('query_info', {})
-    df.attrs['summary'] = json_results.get('summary', {})
-    
-    return df
+    Args:
+        df: DataFrame from transform_weaviate_results
+        max_rows: Maximum number of rows to show per collection
+    """
+    try:
+        # Get metadata from DataFrame attributes
+        query_info = df.attrs.get('query_info', {})
+        summary = df.attrs.get('summary', {})
+        
+        # Start building output
+        sections = []
+        
+        # 1. Query Information
+        sections.append("### Search Query Information")
+        sections.append(f"- Query: {query_info.get('text', 'Not specified')}")
+        sections.append(f"- Type: {query_info.get('type', 'Not specified')}")
+        sections.append(f"- Minimum Score: {query_info.get('min_score', 'Not specified')}")
+        sections.append("")
+        
+        # 2. Result Summary
+        sections.append("### Results Summary")
+        sections.append(f"Total Results: {summary.get('total_results', len(df))}")
+        if 'collection_counts' in summary:
+            sections.append("\nResults by Collection:")
+            for collection, count in summary['collection_counts'].items():
+                sections.append(f"- {collection}: {count}")
+        sections.append("")
+        
+        # 3. Collection-specific previews
+        sections.append("### Result Previews")
+        
+        for collection in df['collection'].unique():
+            collection_df = df[df['collection'] == collection].head(max_rows)
+            if len(collection_df) == 0:
+                continue
+                
+            sections.append(f"\n#### {collection} Preview")
+            
+            # Build preview table based on collection type
+            if collection == 'Article':
+                sections.append("\n| Score | ID | Filename | Abstract Preview |")
+                sections.append("|-------|-----|----------|-----------------|")
+                for _, row in collection_df.iterrows():
+                    # Get filename and abstract
+                    filename = row.get('Article_filename', 'N/A')
+                    abstract = row.get('Article_abstract', '')
+                    # Create abstract preview
+                    abstract_preview = abstract[:50] + "..." if abstract and len(abstract) > 50 else abstract or 'N/A'
+                    # Format row with proper spacing
+                    sections.append(
+                        f"| {row['score']:.3f} | {row['id'][:8]}... | "
+                        f"{filename} | {abstract_preview} |"
+                    )
+                sections.append("")  # Add spacing after table
+                
+            elif collection == 'Reference':
+                sections.append("\n| Score | ID | Title |")
+                sections.append("|-------|-----|-------|")
+                for _, row in collection_df.iterrows():
+                    title = row.get('Reference_title', 'N/A')
+                    # Truncate long titles
+                    title_preview = title[:50] + "..." if len(title) > 50 else title
+                    sections.append(
+                        f"| {row['score']:.3f} | {row['id'][:8]}... | {title_preview} |"
+                    )
+                sections.append("")  # Add spacing after table
+                
+            elif collection == 'NamedEntity':
+                sections.append("\n| Score | ID | Name | Type |")
+                sections.append("|-------|-----|------|------|")
+                for _, row in collection_df.iterrows():
+                    name = row.get('NamedEntity_name', 'N/A')
+                    entity_type = row.get('NamedEntity_type', 'N/A')
+                    sections.append(
+                        f"| {row['score']:.3f} | {row['id'][:8]}... | {name} | {entity_type} |"
+                    )
+                sections.append("")  # Add spacing after table
+            
+            # Add note if there are more results
+            total_count = len(df[df['collection'] == collection])
+            if total_count > max_rows:
+                sections.append(f"... and {total_count - max_rows} more {collection} results\n")
+        
+        # Add score distribution analysis
+        sections.append("### Score Distribution")
+        thresholds = [0.3, 0.5, 0.7, 0.9]
+        sections.append("\n| Minimum Score | Results | By Collection |")
+        sections.append("|---------------|----------|---------------|")
+        
+        for threshold in thresholds:
+            filtered_df = df[df['score'] >= threshold]
+            if len(filtered_df) > 0:
+                collection_counts = filtered_df['collection'].value_counts()
+                counts_str = ", ".join(
+                    f"{col}: {count}" 
+                    for col, count in collection_counts.items()
+                )
+                sections.append(
+                    f"| {threshold:.1f} | {len(filtered_df)} | {counts_str} |"
+                )
+        
+        return "\n".join(sections)
+        
+    except Exception as e:
+        return f"Error formatting results preview: {str(e)}"
 
 def format_results_preview(df: pd.DataFrame, max_rows: int = 5) -> str:
     """Format a preview of the search results.
@@ -3824,55 +4322,50 @@ def generate_score_distribution(df: pd.DataFrame) -> str:
     return "\n".join(output)
 
 def is_literature_query(message: str) -> Tuple[bool, Optional[str]]:
-    """Detect if a message is asking about scientific literature and extract the core query."""
-    print("\n=== Literature Query Detection Debug ===")
-    print(f"Input message: '{message}'")
+    """Detect if a message is requesting literature information.
     
-    # Clean and normalize message
-    message = message.lower().strip()
-    print(f"Normalized message: '{message}'")
-    
-    # Common research-related phrases that explicitly indicate a literature search
-    research_patterns = [
-        r"(?:what is|what's) known about\s+(.+?)(?:\?|$)",
-        # More flexible paper/article search pattern
-        r"(?:find|search for|look for|get)(?:\s+\w+)?\s+(?:papers?|articles?|literature|research)(?:\s+\w+)?\s+(?:about|on|related to|regarding|concerning)\s+(.+?)(?:\?|$)",
-        r"tell me about the research (?:on|in|about)\s+(.+?)(?:\?|$)",
-        r"what research exists (?:on|about)\s+(.+?)(?:\?|$)",
-        r"what (?:papers|articles) discuss\s+(.+?)(?:\?|$)",
-        r"tell me about\s+([A-Z][a-z]+\s+[a-z]+)(?:\?|$)",  # Matches "Bacillus subtilis", etc.
-        r"(?:find|search for|tell me about)\s+(.+?(?:gene|protein|pathway|transposon|plasmid|enzyme|regulator))(?:\?|$)",
-        r"what (?:is|are)\s+([A-Z][a-z]+\s+[a-z]+)(?:\?|$)",  # Another organism pattern
-        # Additional flexible patterns for direct paper requests
-        r"(?:show|give|get)(?:\s+\w+)?\s+(?:papers?|articles?|literature|research)\s+(?:about|on|for)\s+(.+?)(?:\?|$)",
-        r"(?:papers?|articles?|literature|research)\s+(?:about|on|related to)\s+(.+?)(?:\?|$)"
+    Returns:
+        Tuple[bool, Optional[str]]: (is_literature_query, extracted_query)
+    """
+    patterns = [
+        # Basic knowledge patterns
+        r'(?:what is|what\'s) known about\s+(.+?)(?:\?|$)',
+        
+        # Direct literature search patterns
+        r'(?:find|search for|look for|get)(?:\s+\w+)?\s+(?:papers?|articles?|literature|research)(?:\s+\w+)?\s+(?:about|on|related to|regarding|concerning)\s+(.+?)(?:\?|$)',
+        
+        # Research inquiry patterns
+        r'tell me about the research (?:on|in|about)\s+(.+?)(?:\?|$)',
+        r'what research exists (?:on|about)\s+(.+?)(?:\?|$)',
+        r'what (?:papers|articles) discuss\s+(.+?)(?:\?|$)',
+        
+        # Biological entity patterns
+        r'tell me about\s+([A-Z][a-z]+\s+[a-z]+)(?:\?|$)',
+        r'(?:find|search for|tell me about)\s+(.+?(?:gene|protein|pathway|transposon|plasmid|enzyme|regulator))(?:\?|$)',
+        r'what (?:is|are)\s+([A-Z][a-z]+\s+[a-z]+)(?:\?|$)',
+        
+        # Literature request patterns
+        r'(?:show|give|get)(?:\s+\w+)?\s+(?:papers?|articles?|literature|research)\s+(?:about|on|for)\s+(.+?)(?:\?|$)',
+        r'(?:papers?|articles?|literature|research)\s+(?:about|on|related to)\s+(.+?)(?:\?|$)',
+        
+        # Enzyme-specific patterns
+        r'(?:find|tell me about|search for)\s+(.+?ase[s]?)(?:\?|$)',  # Match enzyme names ending in 'ase'
+        r'(?:find|tell me about|search for)\s+(.+?(?:reductase|oxidase|synthase|kinase|phosphatase))(?:\?|$)'  # Common enzyme types
     ]
     
-    # Try each pattern
-    for pattern in research_patterns:
+    print("\n=== Literature Query Detection Debug ===")
+    print(f"Input message: '{message}'")
+    normalized = message.lower().strip()
+    print(f"Normalized message: '{normalized}'")
+    print("\nTrying patterns:")
+    
+    for pattern in patterns:
         print(f"\nTrying pattern: {pattern}")
-        match = re.search(pattern, message)
+        match = re.search(pattern, normalized)
         if match:
             query = match.group(1).strip()
-            # Remove common filler words from the end
-            query = re.sub(r'\s+(?:in|on|about|for|to)\s*$', '', query)
             print(f"Match found! Extracted query: '{query}'")
             return True, query
-        
-    # Check for direct paper/article mentions
-    paper_terms = ['paper', 'article', 'publication', 'study', 'research']
-    words = message.split()
-    for term in paper_terms:
-        if term in words:
-            # Extract everything after the term
-            idx = words.index(term)
-            if idx < len(words) - 1:  # Ensure there's content after the term
-                query = ' '.join(words[idx+1:])
-                # Clean up common prepositions at the start
-                query = re.sub(r'^(?:about|on|related to|regarding|concerning)\s+', '', query)
-                if query:
-                    print(f"Paper term '{term}' found! Extracted query: '{query}'")
-                    return True, query
     
     print("No literature query patterns matched")
     return False, None
@@ -4057,126 +4550,295 @@ def serialize_weaviate_object(obj):
         return [serialize_weaviate_object(item) for item in obj]
     return obj
 
-def transform_weaviate_results_v2(json_results: dict) -> pd.DataFrame:
+def generate_query_id(is_original: bool = True, alt_number: Optional[int] = None) -> str:
+    """Generate a unique query ID with timestamp.
+    
+    Args:
+        is_original (bool): If True, generates ID for primary query
+        alt_number (int, optional): For alternative queries, specifies which alternative (1,2,etc)
+        
+    Returns:
+        str: Query ID in format query_YYYYMMDD_HHMMSS_(original|altN)
     """
-    Transform Weaviate results into a unified dataframe.
-    Handles both raw results from non-Article collections and unified Article results.
-    """
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    if is_original:
+        suffix = '_original'
+    else:
+        if alt_number is None:
+            alt_number = 1
+        suffix = f'_alt{alt_number}'
+        
+    return f"query_{timestamp}{suffix}"
+
+def add_query_ids_to_response(response: str) -> str:
+    """Add unique Query IDs to SQL blocks in the response."""
+    print("\n=== SQL Block Processing Debug ===")
+    print(f"First 100 chars: {response[:100]}")
+    
+    if '```sql' not in response.lower():
+        print("No SQL blocks detected, returning original response")
+        return response
+        
     try:
-        # Debug print the input structure
-        print("\n=== Weaviate Query Results Summary ===")
-        structure = {
-            'raw_collections': list(json_results.get('raw_results', {}).keys()),
-            'unified_count': len(json_results.get('unified_results', [])),
-        }
-        print(json.dumps(structure, indent=2))
+        # Process SQL blocks
+        modified_response = []
+        current_pos = 0
         
-        records = []
+        # Use regex to find all SQL blocks
+        sql_block_pattern = r'(```sql\s*\n?)(.*?)(\n?```)'
+        matches = list(re.finditer(sql_block_pattern, response, re.DOTALL | re.IGNORECASE))
         
-        # Process raw results (non-Article collections)
-        raw_results = json_results.get('raw_results', {})
-        for collection_name, collection_results in raw_results.items():
-            for record in collection_results:
-                transformed = {
-                    'id': str(record['uuid']),
-                    'score': record['score'],
-                    'collection': collection_name,
-                    'cross_references': None
-                }
-                
-                prefix = collection_name.lower()
-                for key, value in record.get('properties', {}).items():
-                    transformed[f'{prefix}_{key}'] = value
-                
-                records.append(transformed)
+        print(f"Found {len(matches)} SQL blocks")
         
-        # Process unified results (Articles with traced elements)
-        unified_results = json_results.get('unified_results', [])
-        
-        for record in unified_results:
-            transformed = {
-                'id': str(record['id']),
-                'score': record['score'],
-                'collection': 'Article'
-            }
+        # Process each block in order
+        for i, match in enumerate(matches):
+            start, end = match.span()
+            modified_response.append(response[current_pos:start])
             
-            # Add properties
-            for key, value in record.get('properties', {}).items():
-                transformed[f'article_{key}'] = value
-            
-            # Handle traced elements
-            traced = record.get('traced_elements', {})
-            if traced:
-                # Convert Weaviate UUIDs to strings in traced elements
-                serialized = {}
-                for collection, elements in traced.items():
-                    if elements:  # Only process if there are elements
-                        serialized[collection] = [
-                            {
-                                'id': str(elem.get('id', elem.get('uuid', ''))),
-                                'score': elem.get('score', 0.0),
-                                'properties': elem.get('properties', {})
-                            } for elem in elements
-                        ]
-                
-                if serialized:  # Only store if we have references
-                    transformed['cross_references'] = json.dumps(serialized)
+            sql_block = match.group(2).strip()
+            # Skip if block already has a Query ID
+            if re.search(r'^--\s*Query ID:', sql_block):
+                modified_response.append(match.group(0))
+            else:
+                # First block gets _original, rest get _altN
+                if i == 0:
+                    query_id = generate_query_id(is_original=True)
                 else:
-                    transformed['cross_references'] = None
-            else:
-                transformed['cross_references'] = None
+                    query_id = generate_query_id(is_original=False, alt_number=i)
+                
+                # Add ID comment at the start of the block
+                modified_block = f"{match.group(1)}-- Query ID: {query_id}\n{sql_block}{match.group(3)}"
+                modified_response.append(modified_block)
             
-            records.append(transformed)
+            current_pos = end
         
-        if not records:
-            print("Warning: No results found")
-            return pd.DataFrame()
+        # Add any remaining text
+        modified_response.append(response[current_pos:])
         
-        # Create DataFrame
-        df = pd.DataFrame(records)
-        
-        # Add query metadata
-        df.attrs['query_info'] = json_results.get('query_info', {})
-        df.attrs['summary'] = json_results.get('summary', {})
-        
-        # Print summary statistics
-        print("\n=== Results Summary ===")
-        print(f"Total records: {len(df)}")
-        print("\nBy collection:")
-        collection_counts = df['collection'].value_counts()
-        for collection, count in collection_counts.items():
-            articles_with_refs = 0
-            if collection == 'Article':
-                articles_with_refs = df[
-                    (df['collection'] == 'Article') & 
-                    (df['cross_references'].notna()) & 
-                    (df['cross_references'] != 'null')
-                ].shape[0]
-                print(f"- {collection}: {count} records ({articles_with_refs} with cross-references)")
-            else:
-                print(f"- {collection}: {count} records")
-        
-        return df
+        result = ''.join(modified_response)
+        print("\nProcessed response preview:")
+        print(result[:200] + "..." if len(result) > 200 else result)
+        return result
         
     except Exception as e:
-        print(f"Error transforming Weaviate results: {str(e)}")
-        print(f"Error traceback: {traceback.format_exc()}")
-        return pd.DataFrame()
+        print(f"Error processing SQL blocks: {str(e)}")
+        return response
+
+def search_all_sources(query: str, threshold: float = 0.6) -> dict:
+    """Search across all available data sources for relevant information."""
+    results = {
+        'dataset_matches': [],
+        'database_matches': [],
+        'literature_matches': [],  # Add literature matches
+        'metadata': {
+            'sources_searched': [],
+            'total_matches': 0,
+            'coverage': {},
+            'query': query,
+            'threshold': threshold,
+            'search_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+    }
+    
+    total_matches = 0
+    
+    # Check for literature query first
+    is_lit, lit_query = is_literature_query(query)
+    if is_lit:
+        try:
+            print("\n=== Executing Literature Search ===")
+            print(f"Literature query: {lit_query}")
+            weaviate_results = execute_weaviate_query(lit_query)
+            if weaviate_results and weaviate_results.get('unified_results'):
+                df = transform_weaviate_results(weaviate_results)
+                results['literature_matches'] = {
+                    'results': weaviate_results,
+                    'preview': format_weaviate_results_preview(df),
+                    'dataframe': df
+                }
+                lit_match_count = len(weaviate_results.get('unified_results', []))
+                total_matches += lit_match_count
+                results['metadata']['sources_searched'].append('literature')
+                results['metadata']['coverage']['literature'] = {
+                    'total_matches': lit_match_count,
+                    'total_articles': len(df) if df is not None else 0
+                }
+        except Exception as e:
+            print(f"Literature search error: {str(e)}")
+            results['metadata']['errors'] = results['metadata'].get('errors', [])
+            results['metadata']['errors'].append(f"Literature search error: {str(e)}")
+    
+    # Search datasets if available
+    if text_searcher.fitted:
+        try:
+            dataset_results = text_searcher.search_text(query, threshold=threshold)
+            if dataset_results:
+                results['dataset_matches'] = dataset_results
+                dataset_match_count = sum(len(match['details']) for match in dataset_results)
+                total_matches += dataset_match_count
+                results['metadata']['sources_searched'].append('datasets')
+                results['metadata']['coverage']['datasets'] = {
+                    'total_matches': dataset_match_count,
+                    'matched_datasets': [r['source_name'] for r in dataset_results],
+                    'total_values': sum(
+                        sum(len(details['matches']) for details in match['details'].values())
+                        for match in dataset_results
+                    )
+                }
+        except Exception as e:
+            print(f"Dataset search error: {str(e)}")
+            results['metadata']['errors'] = results['metadata'].get('errors', [])
+            results['metadata']['errors'].append(f"Dataset search error: {str(e)}")
+    
+    # Search database if available and initialized
+    try:
+        if text_searcher_db and text_searcher_db.fitted:
+            db_results = text_searcher_db.search_text(query, threshold=threshold)
+            if db_results:
+                results['database_matches'] = db_results
+                db_match_count = sum(len(match['details']) for match in db_results)
+                total_matches += db_match_count
+                results['metadata']['sources_searched'].append('database')
+                results['metadata']['coverage']['database'] = {
+                    'total_matches': db_match_count,
+                    'matched_tables': list(set(r['source_name'] for r in db_results)),
+                    'total_values': sum(
+                        sum(len(details['matches']) for details in match['details'].values())
+                        for match in db_results
+                    )
+                }
+    except Exception as e:
+        print(f"Database search error: {str(e)}")
+        results['metadata']['errors'] = results['metadata'].get('errors', [])
+        results['metadata']['errors'].append(f"Database search error: {str(e)}")
+    
+    # Update total matches
+    results['metadata']['total_matches'] = total_matches
+    
+    return results
+
+def format_search_results(results: dict) -> str:
+    """Format search results into a readable markdown summary."""
+    # Early return if no sources were searched
+    if not results['metadata']['sources_searched']:
+        return "No data sources were available to search."
+
+    # Calculate match counts
+    dataset_matches = len(results.get('dataset_matches', []))
+    database_matches = len(results.get('database_matches', []))
+    literature_matches = 0
+    if results.get('literature_matches'):
+        literature_matches = results['literature_matches'].get('results', {}).get('unified_results', [])
+        literature_matches = len(literature_matches)
+    total_matches = dataset_matches + database_matches + literature_matches
+
+    # Early return if no matches found
+    if total_matches == 0:
+        return "No matches found in available data sources."
+
+    sections = []
+    
+    # Add header with search coverage info
+    sections.append("### Search Results Summary")
+    sources = results['metadata']['sources_searched']
+    
+    sections.append(f"Found {total_matches} total matches across available sources:")
+    if 'literature' in sources and literature_matches > 0:
+        sections.append(f"- Literature: {literature_matches} matches")
+    if 'datasets' in sources and dataset_matches > 0:
+        sections.append(f"- Datasets: {dataset_matches} matches")
+    if 'database' in sources and database_matches > 0:
+        sections.append(f"- Database: {database_matches} matches")
+    sections.append("")
+    
+    # Format literature matches first if present
+    if results.get('literature_matches'):
+        sections.append("#### Literature Matches")
+        sections.append(results['literature_matches']['preview'])
+    
+    # Format dataset matches
+    if results['dataset_matches']:
+        sections.append("#### Dataset Matches")
+        for match in results['dataset_matches']:
+            sections.append(f"\nDataset: **{match['source_name']}** (Score: {match['similarity']:.2f})")
+            for col_name, details in match['details'].items():
+                total_matches = len(details['matches'])
+                sections.append(f"\nColumn `{col_name}`: {total_matches} matching values")
+                
+                # Show all matches with counts, sorted by similarity
+                all_matches = sorted(
+                    details['matches'],
+                    key=lambda x: details['similarities'][x],
+                    reverse=True
+                )
+                for value in all_matches:
+                    count = details['counts'][value]
+                    similarity = details['similarities'][value]
+                    sections.append(f"- '{value}' ({count} occurrences, {similarity:.0f}% match)")
+    
+    # Format database matches
+    if results['database_matches']:
+        sections.append("\n#### Database Matches")
+        for match in results['database_matches']:
+            sections.append(f"\nTable: **{match['source_name']}** (Score: {match['similarity']:.2f})")
+            for col_name, details in match['details'].items():
+                total_matches = len(details['matches'])
+                sections.append(f"\nColumn `{col_name}`: {total_matches} matching values")
+                
+                # Show all matches with counts, sorted by similarity
+                all_matches = sorted(
+                    details['matches'],
+                    key=lambda x: details['similarities'][x],
+                    reverse=True
+                )
+                for value in all_matches:
+                    count = details['counts'][value]
+                    similarity = details['similarities'][value]
+                    sections.append(f"- '{value}' ({count} occurrences, {similarity:.0f}% match)")
+    
+    # Add error information if any
+    if 'errors' in results['metadata']:
+        sections.append("\n#### Search Errors")
+        for error in results['metadata']['errors']:
+            sections.append(f"- {error}")
+    
+    return "\n".join(sections)
+
+def is_search_query(message: str) -> bool:
+    """Detect if a message is a search query using various patterns."""
+    # First check if it's a dataset/database info request
+    if re.search(r'tell\s+me\s+about\s+(?:my\s+)?(?:database|datasets?)\b', message.lower()):
+        return False
+        
+    search_patterns = [
+        # Direct search commands
+        r'^(?:find|search|look)\s+(?:for|up)?\s*(.+)$',
+        # Question-based searches
+        r'(?:where|which|what|how\s+many|who|when)\s+(?:are|is|was|were|have|has|had)?\s*(.+)$',
+        # Show/list/get patterns
+        r'(?:show|list|get|give)\s+(?:me)?\s+(?:all|any)?\s*(.+)$',
+        # About/containing patterns
+        r'(?:about|containing|related\s+to|with)\s*(.+)$',
+        # Tell me patterns that imply search
+        r'tell\s+me\s+(?:about|of|all)?\s+(.+)$'
+    ]
+    
+    print("\n=== Search Pattern Detection Debug ===")
+    print(f"Input message: '{message}'")
+    normalized = message.lower().strip()
+    print(f"Normalized message: '{normalized}'")
+    print("\nTrying search patterns:")
+    
+    for pattern in search_patterns:
+        print(f"\nPattern: {pattern}")
+        if re.search(pattern, normalized):
+            print("✓ Pattern matched!")
+            return True
+        print("✗ No match")
+    
+    return False
 
 if __name__ == '__main__':
-    # Run tests if in development
-    if os.getenv('FLASK_ENV') == 'development':
-        print("\nTesting literature query detection:")
-        for result in test_literature_query_detection():
-            print(f"Message: {result['message']}")
-            print(f"Expected: {result['expected']}, Got: {result['got']}")
-            print(f"Passed: {result['passed']}\n")
-            
-        print("\nTesting threshold extraction:")
-        for result in test_threshold_extraction():
-            print(f"Message: {result['message']}")
-            print(f"Expected: {result['expected']}, Got: {result['got']}")
-            print(f"Passed: {result['passed']}\n")
-    
     # Start the app
     app.run_server(debug=True, host='0.0.0.0', port=8051)
