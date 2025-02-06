@@ -33,6 +33,16 @@ http://0.0.0.0:8051
 - Use the dropdown and connect button in the upper right
 - Database indexing status is shown via an indicator
 - Click on database table to view schema (tabular and graphical form)
+- Weaviate connection status indicators:
+  - Connection status (circle icon): Shows if Weaviate is connected
+    - Green: Connected successfully
+    - Orange: Connection error
+    - Gray: Disconnected
+  - Collection status (database icon): Shows literature collection availability
+    - Green: Collections available
+    - Orange: Missing or misconfigured collections
+    - Gray: Collections unavailable
+  - Hover over icons for detailed status messages
 
 #### Data Management
 - Drop or upload TSV/ZIP archives using the drop pane

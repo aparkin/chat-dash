@@ -9,31 +9,112 @@
     50% { transform: translateY(-5px); }
 }
 
-.mermaid {
-    width: 100%;
-    height: 100%;
-    overflow: auto;
+/* Make selectors more specific and ensure they override inline styles */
+#database-erd,
+#weaviate-erd,
+[id*="-erd"] {
+    background-color: white !important;
+    width: 100% !important;
+    height: 600px !important;
+    overflow: auto !important;
+    position: relative !important;
+    border: 1px solid #e0e0e0 !important;
+    border-radius: 4px !important;
+    padding: 15px !important;
 }
 
+/* Strengthen Mermaid diagram styling */
+#database-erd .mermaid,
+#weaviate-erd .mermaid,
+[id*="-erd"] .mermaid {
+    width: 100% !important;
+    height: 100% !important;
+    overflow: auto !important;
+    background-color: white !important;
+}
+
+/* Ensure SVG elements inherit the correct background */
+#database-erd .mermaid svg,
+#weaviate-erd .mermaid svg,
+[id*="-erd"] .mermaid svg,
 .mermaid svg {
-    min-width: 100%;
-    min-height: 100%;
-    cursor: move;
+    background-color: white !important;
+    min-width: 100% !important;
+    min-height: 100% !important;
 }
 
-/* Add zoom and pan support */
-.mermaid .svg-pan-zoom_viewport {
-    cursor: move;
+/* Force all diagram elements to have correct background */
+.mermaid * {
+    background-color: inherit !important;
 }
 
-.mermaid:hover {
-    cursor: grab;
+/* Additional specificity for Mermaid elements */
+.mermaid foreignObject {
+    background-color: transparent !important;
 }
 
-.mermaid:active {
-    cursor: grabbing;
+.mermaid .nodes g > rect,
+.mermaid .nodes g > circle,
+.mermaid .nodes g > ellipse {
+    fill: white !important;
+    stroke: #333 !important;
 }
 
+.mermaid .label foreignObject {
+    background-color: transparent !important;
+}
+
+.mermaid .cluster rect {
+    fill: white !important;
+    stroke: #333 !important;
+}
+
+/* Add specific styling for ERD elements */
+.mermaid .er.entityBox {
+    fill: white !important;
+    stroke: #333 !important;
+}
+
+.mermaid .er.attributeBoxEven,
+.mermaid .er.attributeBoxOdd {
+    fill: white !important;
+    stroke: #333 !important;
+}
+
+.mermaid .er.entityLabel,
+.mermaid .er.attributeLabel {
+    fill: black !important;
+}
+
+/* Force SVG background */
+.mermaid > svg {
+    background-color: white !important;
+}
+
+/* Container styling for ERD diagrams */
+.database-erd-container,
+.weaviate-erd-container {
+    width: 100% !important;
+    height: 600px !important;
+    overflow: auto !important;
+    position: relative !important;
+    background-color: white !important;
+    border: 1px solid #e0e0e0 !important;
+    border-radius: 4px !important;
+    padding: 15px !important;
+    margin: 10px 0 !important;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
+}
+
+/* Ensure ERD containers maintain visibility */
+.database-erd-container.visible,
+.weaviate-erd-container.visible {
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+}
+
+/* Preserve existing utility classes */
 .fa-download {
     margin-right: 0;
 }

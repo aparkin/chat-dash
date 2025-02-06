@@ -75,7 +75,7 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 # Find the project root directory (where .env is located)
-project_root = Path(__file__).parent
+project_root = Path(__file__).parent.parent
 dotenv_path = project_root / '.env'
 
 # Try to load from .env file
@@ -623,8 +623,8 @@ class ArticleProcessor:
         try:
             # Create client inside worker process
             client = openai.OpenAI(
-                api_key=os.getenv('OPENAI_API_KEY'),
-                base_url=os.getenv('OPENAI_BASE_URL')
+                api_key=OPENAI_API_KEY,
+                base_url=OPENAI_BASE_URL
             )
             
             response = client.chat.completions.create(
@@ -637,7 +637,7 @@ class ArticleProcessor:
                      "Choose one of: introduction, methods, results, discussion"}
                 ],
                 temperature=0.1,
-                max_tokens=10
+                max_tokens=300
             )
             section_type = response.choices[0].message.content.strip().lower()
             if section_type in {'introduction', 'methods', 'results', 'discussion'}:
