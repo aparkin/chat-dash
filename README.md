@@ -73,6 +73,20 @@ http://0.0.0.0:8051
 - Use natural language to ask questions about your data
 - Reference specific columns using `backticks` when needed
 
+##### Literature Search
+- Search scientific literature using natural language:
+  - "What is known about gene regulation?"
+  - "Find papers about CRISPR"
+  - "Search for articles related to metabolic pathways"
+- Refine search results:
+  - Use "refine lit_query_XXXXXXXX_XXXXXX with threshold 0.X"
+  - Example: "refine lit_query_20250207_123456 with threshold 0.7"
+  - Higher thresholds (0.7-0.9) give more relevant but fewer results
+  - Lower thresholds (0.3-0.5) give more results but may be less relevant
+- Convert literature results to datasets:
+  - "convert lit_query_XXXXXXXX_XXXXXX to dataset"
+  - Creates a new dataset with search results for further analysis
+
 ##### SQL Queries and Database Operations
 - First, select your database using the dropdown at the top of Data Management
 - View database structure in the Database tab under Dataset Info
