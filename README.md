@@ -86,39 +86,78 @@ http://0.0.0.0:8051
 - Combine SQL query results with uploaded data
 
 ##### Visualization Commands
-- Basic plots: "Plot [column1] vs [column2]"
-- Enhanced plots: Add "size=[value/column] color=[value/column]"
-- Heatmaps: "Create heatmap columns=[col1,col2,col3]"
-  - Options: rows=[...] standardize=rows/columns cluster=both/rows/columns
-- Maps: "Create map latitude=[column1] longitude=[column2]"
-  - Options: size=[value/column] color=[value/column]
+Important: First select a dataset by clicking its name in the dataset browser.
+
+1. Bubble Plots:
+   ```
+   plot [y_column] vs [x_column]
+   ```
+   Optional parameters:
+   - size=[number or column_name]
+   - color=[color_name or column_name]
+   * For column-based color: numeric columns create continuous scales, categorical columns create discrete legends
+
+2. Heatmaps:
+   ```
+   heatmap columns=[col1,col2,col3]
+   ```
+   Required:
+   - columns=[col1,col2,...] or columns=regex_pattern
+   
+   Optional:
+   - rows=[row1,row2,...] or rows=regex_pattern fcol=filter_column
+   - standardize=rows|columns
+   - cluster=rows|columns|both
+   - colormap=[valid_plotly_colormap]
+   - transpose=true|false
+
+   Note: When using regex patterns with rows, fcol must specify which column to filter on
+
+3. Geographic Maps:
+   ```
+   map latitude=[lat_column] longitude=[lon_column]
+   ```
+   Required:
+   - latitude=[column_name]
+   - longitude=[column_name]
+   
+   Optional:
+   - size=[number or column_name]
+   - color=[color_name or column_name]
+   * Numeric color columns show colorbar, categorical show legend
 
 #### Visualization Features
-Currently supported visualization types:
+All visualizations include:
+- Interactive controls:
+  * Pan: Click and drag
+  * Zoom: Mouse wheel or pinch gestures
+  * Reset: Double-click
+  * Export: High-quality PNG via camera icon
+  * Tooltips: Hover for detailed values
+  * Modebar: Additional tools and options
+
+Visualization Types:
 
 ##### Bubble Plots
-- 2D scatter plots with size and color dimensions
-- Customizable axes and labels
-- Interactive tooltips and zooming
-- Adjustable plot parameters in Visualization tab
+- 2D scatter plots with customizable:
+  * Axes and labels
+  * Point sizes (static or data-driven)
+  * Colors (continuous for numeric, discrete for categorical)
 
 ##### Maps
-- Geographical data visualization
-- Support for latitude/longitude plotting
-- Color coding by data values
-- Interactive pan and zoom
+- Geographical visualization with:
+  * Automatic zoom based on coordinate spread
+  * Dynamic point sizing
+  * Color mapping (colorbar for numeric, legend for categorical)
+  * Automatic invalid coordinate filtering
 
 ##### Heatmaps
-- Correlation analysis
-- Matrix-style data visualization
-- Custom color scales
-- Interactive value inspection
-
-All visualizations feature:
-- Interactive controls
-- Export capabilities
-- Real-time updates
-- Responsive design
+- Matrix visualization featuring:
+  * Flexible data selection (explicit lists or regex patterns)
+  * Row/column standardization
+  * Hierarchical clustering with optimal ordering
+  * Customizable colormaps
+  * Optional transposition
 
 #### Data Analysis Features
 - Preview: First few rows of datasets
