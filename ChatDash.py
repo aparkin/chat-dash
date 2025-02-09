@@ -85,6 +85,8 @@ from pathlib import Path
 from weaviate_integration import WeaviateConnection
 from weaviate_manager.query.manager import QueryManager
 import traceback
+from services import registry as service_registry
+from services import ServiceMessage
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore', category=Warning)
@@ -145,6 +147,20 @@ CHAT_STYLES = {
     'assistant': {
         'backgroundColor': '#f8f9fa',
         'maxWidth': '75%'
+    },
+    'service': {  # Add service-specific styling
+        'backgroundColor': '#e9ecef',  # Light gray background
+        'border': '1px solid #dee2e6',  # Subtle border
+        'borderLeft': '4px solid #6c757d',  # Left accent border
+        'maxWidth': '90%',  # Wider than other messages
+        'fontFamily': 'monospace'  # Better for tables
+    },
+    'service_error': {  # Style for service error messages
+        'backgroundColor': '#fff3f3',
+        'border': '1px solid #dc3545',
+        'borderLeft': '4px solid #dc3545',
+        'maxWidth': '75%',
+        'color': '#dc3545'
     }
 }
 
@@ -598,7 +614,8 @@ text_searcher_db = DatabaseTextSearch()
 def create_system_message(dataset_info: List[Dict[str, Any]], 
                          search_query: Optional[str] = None,
                          database_structure: Optional[Dict] = None,
-                         weaviate_results: Optional[Dict] = None) -> str:
+                         weaviate_results: Optional[Dict] = None,
+                         service_context: Optional[Dict] = None) -> str:
     """Create system message with context from datasets, database, and literature."""
     print("\n=== System Message Creation Debug ===")
     print(f"Database structure type: {type(database_structure)}")
@@ -779,6 +796,11 @@ def create_system_message(dataset_info: List[Dict[str, Any]],
     base_message += "\n- NEVER suggest querying data sources that are not currently connected"
     base_message += "\n- NEVER claim to have executed queries or retrieved data unless explicitly done by the user"
 
+    if service_context:
+        base_message += "\n\nService Context:"
+        for key, value in service_context.items():
+            base_message += f"\n- {key}: {value}"
+
     return base_message
 
 def create_chat_element(message: dict) -> dbc.Card:
@@ -787,20 +809,52 @@ def create_chat_element(message: dict) -> dbc.Card:
     
     Args:
         message (dict): Message dictionary containing:
-            - role (str): One of 'user', 'assistant', or 'system'
+            - role (str): One of 'user', 'assistant', 'system', or 'service'
             - content (str): The message text
+            - service (str, optional): Service name if message is from a service
+            - type (str, optional): Message type for service messages
         
     Returns:
-        dbc.Card: Styled card component for the chat interface with:
-            - Appropriate styling based on message role
-            - Markdown rendering for assistant messages
-            - Proper alignment and spacing
+        dbc.Card: Styled card component
     """
-    style = CHAT_STYLES.get(message['role'], CHAT_STYLES['assistant'])
-    content = dcc.Markdown(message['content']) if message['role'] == 'assistant' else message['content']
+    # Determine style based on message properties
+    if 'service' in message:
+        # Service message styling
+        if message.get('type') == 'error':
+            style = CHAT_STYLES['service_error']
+        else:
+            style = CHAT_STYLES['service']
+            
+        # Add service indicator if not an error
+        if message.get('type') != 'error':
+            header = html.Div(
+                f"Service: {message['service']}",
+                style={
+                    'fontSize': '0.8em',
+                    'color': '#6c757d',
+                    'marginBottom': '8px'
+                }
+            )
+        else:
+            header = None
+            
+        # Always render service content as markdown
+        content = dcc.Markdown(
+            message['content'],
+            style={'width': '100%'}  # Ensure tables can use full width
+        )
+        
+        # Create card body with optional header
+        card_body = [header, content] if header else [content]
+        
+    else:
+        # Regular message styling
+        style = CHAT_STYLES.get(message['role'], CHAT_STYLES['assistant'])
+        content = dcc.Markdown(message['content']) if message['role'] == 'assistant' else message['content']
+        card_body = [content]
     
     return dbc.Card(
-        dbc.CardBody(content),
+        dbc.CardBody(card_body),
         className="mb-2 ml-auto" if message['role'] == 'user' else "mb-2",
         style=style
     )
@@ -1423,102 +1477,6 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
         chat_history = chat_history or []
         current_message = {'role': 'user', 'content': input_value.strip()}
 
-        # Check for dataset information request
-
-
-        
-        # Check for threshold refinement
-        threshold = extract_threshold_from_message(input_value)
-        query_id = extract_query_id_from_message(input_value) if threshold else None
-        
-        if threshold is not None and query_id is not None:
-            print(f"\n=== Processing Threshold Refinement ===")
-            print(f"Query ID: {query_id}")
-            print(f"New threshold: {threshold}")
-            
-            chat_history.append(current_message)
-            
-            if query_id not in successful_queries:
-                chat_history.append({
-                    'role': 'assistant',
-                    'content': f"❌ Query {query_id} not found in history."
-                })
-                return (
-                    create_chat_elements_batch(chat_history),
-                    '',
-                    chat_history,
-                    dash.no_update,
-                    dash.no_update,
-                    "",
-                    successful_queries
-                )
-            
-            try:
-                stored_query = successful_queries[query_id]
-                original_query = stored_query['query']
-                
-                # Execute query with new threshold
-                weaviate_results = execute_weaviate_query(original_query, min_score=threshold)
-                if not weaviate_results or not weaviate_results.get('unified_results'):
-                    raise Exception("No results found with new threshold")
-                
-                # Transform and store results
-                df = transform_weaviate_results(weaviate_results)
-                new_query_id = generate_literature_query_id(original_query, threshold)
-                
-                successful_queries[new_query_id] = {
-                    'query': original_query,
-                    'threshold': threshold,
-                    'dataframe': df.to_dict('records'),
-                    'metadata': {
-                        'execution_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        'total_results': len(df),
-                        'query_info': df.attrs.get('query_info', {}),
-                        'summary': df.attrs.get('summary', {})
-                    }
-                }
-                
-                # Format response with comparison
-                old_df = pd.DataFrame(stored_query['dataframe'])
-                response = f"""Refined search results:
-
-Previous results (threshold {stored_query['threshold']}): {len(old_df)} matches
-New results (threshold {threshold}): {len(df)} matches
-
-{format_literature_preview(df, new_query_id, threshold)}"""
-                
-                chat_history.append({
-                    'role': 'assistant',
-                    'content': response
-                })
-                
-                return (
-                    create_chat_elements_batch(chat_history),
-                    '',
-                    chat_history,
-                    dash.no_update,
-                    dash.no_update,
-                    "",
-                    successful_queries
-                )
-                
-            except Exception as e:
-                error_msg = f"Error refining query: {str(e)}"
-                print(error_msg)
-                chat_history.append({
-                    'role': 'assistant',
-                    'content': f"❌ {error_msg}"
-                })
-                return (
-                    create_chat_elements_batch(chat_history),
-                    '',
-                    chat_history,
-                    dash.no_update,
-                    dash.no_update,
-                    "",
-                    successful_queries
-                )
-        
         # Handle help request
         if input_value.lower().strip() in ["help", "help me", "what can i do?", "what can i do", "what can you do?", "what can you do"]:
             chat_history.append(current_message)
@@ -1535,6 +1493,225 @@ New results (threshold {threshold}): {len(df)} matches
                 "",
                 dash.no_update  # No store update needed
             )
+        
+        # Add service detection wrapper
+        handlers = service_registry.detect_handlers(input_value)
+        if len(handlers) > 1:
+            # Multiple services detected - add warning message
+            warning = ServiceMessage(
+                service="system",
+                content=f"Warning: Multiple services ({', '.join(name for name, _ in handlers)}) attempted to handle this message. This may indicate a service configuration issue.",
+                message_type="warning"
+            )
+            chat_history.append(warning.to_chat_message())
+            
+        elif len(handlers) == 1:
+            # Single service detected - execute it
+            service_name, service = handlers[0]
+            print(f"\n=== Service Execution Debug ===")
+            print(f"Message: {input_value}")
+            print(f"Executing service: {service_name}")
+            
+            try:
+                # Add message to chat history first
+                chat_history.append(current_message)
+                
+                # Parse request
+                params = service.parse_request(input_value)
+                
+                # Create execution context
+                context = {
+                    'datasets_store': datasets,
+                    'successful_queries_store': successful_queries,
+                    'selected_dataset': selected_dataset,
+                    'database_state': database_state,
+                    'database_structure': database_structure_store,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                # Execute service
+                response = service.execute(params, context)
+                
+                # Add service messages to chat
+                for msg in response.messages:
+                    chat_history.append(msg.to_chat_message())
+                
+                # Create system message with context for LLM
+                if response.context:
+                    system_message = create_system_message(
+                        dataset_info=[{
+                            'name': name,
+                            'rows': len(pd.DataFrame(data['df'])),
+                            'columns': list(pd.DataFrame(data['df']).columns),
+                            'selected': name == selected_dataset
+                        } for name, data in datasets.items()] if datasets else [],
+                        database_structure=database_structure_store,
+                        service_context=response.context.to_dict()
+                    )
+                else:
+                    system_message = create_system_message(
+                        dataset_info=[{
+                            'name': name,
+                            'rows': len(pd.DataFrame(data['df'])),
+                            'columns': list(pd.DataFrame(data['df']).columns),
+                            'selected': name == selected_dataset
+                        } for name, data in datasets.items()] if datasets else [],
+                        database_structure=database_structure_store
+                    )
+                
+                # Get LLM response
+                messages = [
+                    {'role': 'system', 'content': system_message},
+                    *[{'role': msg['role'], 'content': str(msg['content'])} for msg in chat_history]
+                ]
+                
+                llm_response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.4,
+                    max_tokens=8192
+                )
+                
+                # Add LLM response to chat
+                chat_history.append({
+                    'role': 'assistant',
+                    'content': llm_response.choices[0].message.content
+                })
+                
+                # Update stores if needed
+                if response.store_updates:
+                    successful_queries.update(response.store_updates)
+                
+                # Return with any state updates
+                return (
+                    create_chat_elements_batch(chat_history),
+                    '',
+                    chat_history,
+                    response.state_updates.get('active_tab', dash.no_update),
+                    response.state_updates.get('viz_state', dash.no_update),
+                    "",
+                    successful_queries
+                )
+                
+            except Exception as e:
+                print(f"Service execution error: {str(e)}")
+                error_msg = ServiceMessage(
+                    service=service_name,
+                    content=f"Error executing service: {str(e)}",
+                    message_type="error"
+                )
+                chat_history.append(error_msg.to_chat_message())
+                return (
+                    create_chat_elements_batch(chat_history),
+                    '',
+                    chat_history,
+                    dash.no_update,
+                    dash.no_update,
+                    "",
+                    successful_queries
+                )
+
+        # Skip old literature handling if service handled it
+        literature_service_handled = any(
+            handler[1].name == "literature" 
+            for handler in service_registry.detect_handlers(input_value)
+        )
+        
+        if not literature_service_handled:
+            # Check for threshold refinement
+            threshold = extract_threshold_from_message(input_value)
+            query_id = extract_query_id_from_message(input_value) if threshold else None
+            
+            if threshold is not None and query_id is not None:
+                print(f"\n=== Processing Threshold Refinement (Legacy) ===")
+                print(f"Query ID: {query_id}")
+                print(f"New threshold: {threshold}")
+                
+                
+                chat_history.append(current_message)
+                
+                if query_id not in successful_queries:
+                    chat_history.append({
+                        'role': 'assistant',
+                        'content': f"❌ Query {query_id} not found in history."
+                    })
+                    return (
+                        create_chat_elements_batch(chat_history),
+                        '',
+                        chat_history,
+                        dash.no_update,
+                        dash.no_update,
+                        "",
+                        successful_queries
+                    )
+                
+                try:
+                    stored_query = successful_queries[query_id]
+                    original_query = stored_query['query']
+                    
+                    # Execute query with new threshold
+                    weaviate_results = execute_weaviate_query(original_query, min_score=threshold)
+                    if not weaviate_results or not weaviate_results.get('unified_results'):
+                        raise Exception("No results found with new threshold")
+                    
+                    # Transform and store results
+                    df = transform_weaviate_results(weaviate_results)
+                    new_query_id = generate_literature_query_id(original_query, threshold)
+                    
+                    successful_queries[new_query_id] = {
+                        'query': original_query,
+                        'threshold': threshold,
+                        'dataframe': df.to_dict('records'),
+                        'metadata': {
+                            'execution_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            'total_results': len(df),
+                            'query_info': df.attrs.get('query_info', {}),
+                            'summary': df.attrs.get('summary', {})
+                        }
+                    }
+                    
+                    # Format response with comparison
+                    old_df = pd.DataFrame(stored_query['dataframe'])
+                    response = f"""Refined search results:
+
+    Previous results (threshold {stored_query['threshold']}): {len(old_df)} matches
+    New results (threshold {threshold}): {len(df)} matches
+
+    {format_literature_preview(df, new_query_id, threshold)}"""
+                    
+                    chat_history.append({
+                        'role': 'assistant',
+                        'content': response
+                    })
+                    
+                    return (
+                        create_chat_elements_batch(chat_history),
+                        '',
+                        chat_history,
+                        dash.no_update,
+                        dash.no_update,
+                        "",
+                        successful_queries
+                    )
+                    
+                except Exception as e:
+                    error_msg = f"Error refining query: {str(e)}"
+                    print(error_msg)
+                    chat_history.append({
+                        'role': 'assistant',
+                        'content': f"❌ {error_msg}"
+                    })
+                    return (
+                        create_chat_elements_batch(chat_history),
+                        '',
+                        chat_history,
+                        dash.no_update,
+                        dash.no_update,
+                        "",
+                        successful_queries
+                    )
+        
+
             
         chat_history.append(current_message)
         
@@ -1637,7 +1814,7 @@ New results (threshold {threshold}): {len(df)} matches
             return context
         
         # Handle search queries
-        if is_search_query(input_value):
+        if not literature_service_handled and is_search_query(input_value):
             print("\n=== Processing Search Query ===")
             search_results, successful_queries = search_all_sources(input_value, successful_queries=successful_queries)
             
@@ -2319,21 +2496,6 @@ def highlight_selected_dataset(selected_dataset, datasets):
             
     return [styles]
 
-# Optimize dataset search
-def find_mentioned_dataset(input_text: str, dataset_names: list) -> str:
-    """
-    Efficiently search for mentioned dataset names in input text.
-    
-    Args:
-        input_text (str): User's input message
-        dataset_names (list): List of available dataset names
-        
-    Returns:
-        str: Name of mentioned dataset or None
-    """
-    input_lower = input_text.lower()
-    return next((name for name in dataset_names if name.lower() in input_lower), None)
-
 @callback(
     Output('download-selected-datasets', 'data', allow_duplicate=True),
     Input('download-button', 'n_clicks'),
@@ -2438,41 +2600,6 @@ def handle_dataset_selection(n_clicks, datasets, chat_store):
             'content': info_message,
             'selected_dataset': dataset_name
         })
-        
-        # Check for unprocessed plot request in the last message only
-        last_message = chat_history[-2] if len(chat_history) >= 2 else None
-        if last_message and last_message.get('plot_request') and not last_message.get('processed'):
-            plot_request = last_message['plot_request']
-            
-            # Process the plot request
-            available_columns = list(df.columns)
-            params, error_msg = extract_plot_params(plot_request, available_columns)
-            
-            if error_msg:
-                chat_history.append({
-                    'role': 'assistant',
-                    'content': f"{error_msg}\n\nAvailable columns are: {', '.join(available_columns)}"
-                })
-                # Mark the request as processed
-                last_message['processed'] = True
-                return dataset_name, create_chat_elements_batch(chat_history), chat_history, 'tab-preview'
-            
-            # Store plot parameters and mark as processed
-            last_message['processed'] = True
-            chat_history.append({
-                'role': 'assistant',
-                'content': (
-                    f"I've set up a bubble plot with:\n"
-                    f"- X: {params['x_column']}\n"
-                    f"- Y: {params['y_column']}\n"
-                    f"- Size: {params['size'] if params['size'] else 'default'}\n"
-                    f"- Color: {params['color'] if params['color'] else 'default'}\n\n"
-                    f"You can view and adjust the plot in the Visualization tab."
-                ),
-                'plot_params': params
-            })
-            
-            return dataset_name, create_chat_elements_batch(chat_history), chat_history, 'tab-viz'
         
         # Default behavior: just update dataset selection
         return dataset_name, create_chat_elements_batch(chat_history), chat_history, 'tab-preview'
@@ -3042,357 +3169,12 @@ app.clientside_callback(
 #
 ####################################
 
-class BubblePlotParams:
-    def __init__(self):
-        self.x_column = None
-        self.y_column = None
-        self.size = None  # Could be column name, number, or None
-        self.color = None  # Could be column name, color name, or None
-        
-    def validate(self, df: pd.DataFrame) -> tuple[bool, str]:
-        """Validate parameters against a dataframe."""
-        try:
-            # Check required parameters
-            if not self.x_column or not self.y_column:
-                return False, "X and Y columns are required"
-                
-            # Check if columns exist
-            if self.x_column not in df.columns:
-                return False, f"X column '{self.x_column}' not found in dataset"
-            if self.y_column not in df.columns:
-                return False, f"Y column '{self.y_column}' not found in dataset"
-                
-            # If size is a column name, check if it exists
-            if isinstance(self.size, str) and self.size in df.columns:
-                if not pd.to_numeric(df[self.size], errors='coerce').notna().all():
-                    return False, f"Size column '{self.size}' must contain numeric values"
-                    
-            # If color is a column name, check if it exists
-            if isinstance(self.color, str) and self.color in df.columns:
-                pass  # We'll handle color mapping later
-                
-            return True, ""
-            
-        except Exception as e:
-            return False, f"Validation error: {str(e)}"
-
-# Add a new callback to handle the plot validation
-@callback(
-    Output('plot-validation-output', 'children'),
-    [Input('x-column', 'value'),
-     Input('y-column', 'value'),
-     Input('size-input', 'value'),
-     Input('color-input', 'value')],
-    [State('selected-dataset-store', 'data'),
-     State('datasets-store', 'data')]
-)
-def validate_plot_params(x_col, y_col, size, color, selected_dataset, datasets):
-    """Test the BubblePlotParams validation."""
-    if not selected_dataset or not datasets or selected_dataset not in datasets:
-        return "Please select a dataset"
-        
-    try:
-        # Get the dataframe
-        df = pd.DataFrame(datasets[selected_dataset]['df'])
-        
-        # Create and populate params
-        params = BubblePlotParams()
-        params.x_column = x_col
-        params.y_column = y_col
-        params.size = size
-        params.color = color
-        
-        # Validate
-        is_valid, message = params.validate(df)
-        
-        if is_valid:
-            return html.Div("Parameters are valid!", style={'color': 'green'})
-        else:
-            return html.Div(f"Validation error: {message}", style={'color': 'red'})
-            
-    except Exception as e:
-        return html.Div(f"Error: {str(e)}", style={'color': 'red'})
-
-# Add a new callback to handle the plot validation
-@callback(
-    Output('bubble-plot', 'figure'),
-    [Input('x-column', 'value'),
-     Input('y-column', 'value'),
-     Input('size-input', 'value'),
-     Input('color-input', 'value')],
-    [State('selected-dataset-store', 'data'),
-     State('datasets-store', 'data')]
-)
-def update_bubble_plot(x_col, y_col, size, color, selected_dataset, datasets):
-    """Generate the bubble plot based on selected parameters."""
-    if not selected_dataset or not datasets or selected_dataset not in datasets:
-        return {}
-        
-    try:
-        # Get the dataframe
-        df = pd.DataFrame(datasets[selected_dataset]['df'])
-        
-        # Create and validate parameters
-        params = BubblePlotParams()
-        params.x_column = x_col
-        params.y_column = y_col
-        params.size = size
-        params.color = color
-        
-        is_valid, message = params.validate(df)
-        if not is_valid:
-            return {}
-            
-        # Process size parameter
-        if params.size is None:
-            marker_size = 20  # Default size
-        elif params.size in df.columns:
-            marker_size = df[params.size]
-        else:
-            try:
-                marker_size = float(params.size)
-            except ValueError:
-                marker_size = 20
-                
-        # Process color parameter
-        if params.color is None:
-            marker_color = 'blue'  # Default color
-        elif params.color in df.columns:
-            marker_color = df[params.color]
-        else:
-            marker_color = params.color
-            
-        # Create the plot
-        fig = px.scatter(
-            df,
-            x=params.x_column,
-            y=params.y_column,
-            size=marker_size if isinstance(marker_size, pd.Series) else None,
-            color=marker_color if isinstance(marker_color, pd.Series) else None,
-            title=f'Bubble Plot: {params.y_column} vs {params.x_column}'
-        )
-        
-        if not isinstance(marker_size, pd.Series):
-            fig.update_traces(marker=dict(size=marker_size))
-        if not isinstance(marker_color, pd.Series) and marker_color is not None:
-            fig.update_traces(marker=dict(color=marker_color))
-            
-        return fig
-        
-    except Exception as e:
-        return {}
-
 def is_plot_request(message: str) -> bool:
     """Check if the message is requesting a plot."""
 
     plot_keywords = ['plot', 'graph', 'visualize', 'show', 'display']
     message = message.lower()
     return any(keyword in message for keyword in plot_keywords)
-
-def extract_plot_params(message: str, available_columns: List[str]) -> Tuple[dict, Optional[str]]:
-    """Extract plot parameters from message using fuzzy matching."""
-    params = {'x_column': None, 'y_column': None, 'size': None, 'color': None}
-    
-    # Clean up message - remove punctuation from vs variations
-    message = message.replace('vs.', 'vs').replace('versus.', 'versus')
-    
-    # Extract x and y columns
-    if 'vs' in message:
-        parts = message.split('vs')
-    elif 'versus' in message:
-        parts = message.split('versus')
-    elif 'against' in message:
-        parts = message.split('against')
-    else:
-        return params, "Could not find column comparison using 'vs', 'versus', or 'against'"
-    
-    # Clean and extract column names
-    y_col = parts[0].replace('plot', '').strip()
-    x_col = parts[1].split('size=')[0].split('color=')[0].strip()
-    
-    # Match column names
-    if y_col.lower() not in [col.lower() for col in available_columns]:
-        return params, f"Could not find Y column '{y_col}'. Available columns are: {', '.join(available_columns)}"
-    if x_col.lower() not in [col.lower() for col in available_columns]:
-        return params, f"Could not find X column '{x_col}'. Available columns are: {', '.join(available_columns)}"
-    
-    # Get original case for columns
-    params['y_column'] = next(col for col in available_columns if col.lower() == y_col.lower())
-    params['x_column'] = next(col for col in available_columns if col.lower() == x_col.lower())
-    
-    # Extract size parameter - allow numbers
-    size_match = re.search(r'size\s*=\s*(\d+(?:\.\d+)?|\w+)', message)
-    if size_match:
-        params['size'] = size_match.group(1)
-    
-    # Extract color parameter - allow hex colors and RGB values
-    color_match = re.search(r'color\s*=\s*(#[0-9a-fA-F]{6}|#[0-9a-fA-F]{3}|rgb\s*\([^)]+\)|\w+)', message)
-    if color_match:
-        params['color'] = color_match.group(1)
-    
-    return params, None
-
-def extract_map_params(message: str, available_columns: List[str]) -> Tuple[dict, str]:
-    """Extract map parameters from message."""
-    params = {
-        'latitude': None,
-        'longitude': None,
-        'size': None,
-        'color': None
-    }
-    
-    lat_match = re.search(r'latitude\s*=\s*(\w+)', message.lower())
-    lon_match = re.search(r'longitude\s*=\s*(\w+)', message.lower())
-    
-    if not lat_match or not lon_match:
-        return params, """To create a map, please specify both latitude and longitude columns:
-map latitude=<column1> longitude=<column2>
-Optional: Add size=<column/value> or color=<column/value>"""
-    
-    lat_col = lat_match.group(1)
-    lon_col = lon_match.group(1)
-    
-    # Fuzzy match column names
-    lat_col = process.extractOne(lat_col, available_columns)[0]
-    lon_col = process.extractOne(lon_col, available_columns)[0]
-    
-    params['latitude'] = lat_col
-    params['longitude'] = lon_col
-    
-    # Extract optional parameters
-    size_match = re.search(r'size\s*=\s*(\w+|\d+\.?\d*)', message.lower())
-    if size_match:
-        size_val = size_match.group(1)
-        try:
-            size_val = float(size_val)
-            params['size'] = size_val
-        except ValueError:
-            size_col = process.extractOne(size_val, available_columns)[0]
-            params['size'] = size_col
-    
-    color_match = re.search(r'color\s*=\s*(\w+)', message.lower())
-    if color_match:
-        color_col = color_match.group(1)
-        color_col = process.extractOne(color_col, available_columns)[0]
-        params['color'] = color_col
-    
-    return params, None
-
-def extract_heatmap_params(message: str, available_columns: List[str]) -> Tuple[dict, Optional[str]]:
-    """Extract heatmap parameters from message.
-    
-    Example formats:
-    - columns=[Be, B, Na, Mg] transpose
-    - columns=[Be,B,Na,Mg] rows=[Fe,Cu] transpose=true
-    - columns=[Be,B,Na,Mg] standardize=rows cluster=both colormap=RdBu
-    """
-    params = {
-        'rows': None,
-        'columns': None,
-        'standardize': None,
-        'transpose': False,
-        'cluster': None,
-        'colormap': 'viridis'
-    }
-    
-    # Extract bracketed lists for rows and columns
-    row_match = re.search(r'rows?\s*=\s*\[(.*?)\]', message)
-    col_match = re.search(r'columns?\s*=\s*\[(.*?)\]', message)
-    std_match = re.search(r'standardize=([^\s\]]+)', message)
-    cluster_match = re.search(r'cluster=([^\s\]]+)', message)
-    colormap_match = re.search(r'colou?rmap=([^\s\]]+)', message)
-    
-    # Check for transpose before processing columns
-    params['transpose'] = 'transpose' in message.lower()
-    if 'transpose=' in message.lower():
-        transpose_match = re.search(r'transpose=(true|false)', message.lower())
-        if transpose_match:
-            params['transpose'] = transpose_match.group(1).lower() == 'true'
-    
-    # Process rows
-    if row_match:
-        rows = [col.strip() for col in row_match.group(1).split(',') if col.strip()]
-        invalid_rows = [col for col in rows if col not in available_columns]
-        if invalid_rows:
-            return params, f"Invalid row columns: {', '.join(invalid_rows)}\nAvailable columns: {', '.join(available_columns)}"
-        params['rows'] = rows
-        
-    # Process columns
-    if col_match:
-        cols = [col.strip() for col in col_match.group(1).split(',') if col.strip()]
-        invalid_cols = [col for col in cols if col not in available_columns]
-        if invalid_cols:
-            valid_cols = [col for col in cols if col in available_columns]
-            error_msg = (
-                f"Found {len(invalid_cols)} invalid column names:\n"
-                f"Invalid: {', '.join(invalid_cols)}\n"
-                f"Valid: {', '.join(valid_cols)}"
-            )
-            return params, error_msg
-        params['columns'] = cols
-        
-    # Process standardization
-    if std_match:
-        std_value = std_match.group(1).lower()
-        if std_value not in ['rows', 'columns', 'none']:
-            return params, "Standardization must be 'rows', 'columns', or 'none'"
-        params['standardize'] = None if std_value == 'none' else std_value
-        
-    # Process clustering
-    if cluster_match:
-        cluster_value = cluster_match.group(1).lower()
-        if cluster_value not in ['rows', 'columns', 'both', 'none']:
-            return params, "Clustering must be 'rows', 'columns', 'both', or 'none'"
-        params['cluster'] = None if cluster_value == 'none' else cluster_value
-        
-    # Process colormap
-    if colormap_match:
-        colormap = colormap_match.group(1).lower()
-        valid_colormaps =px.colors.named_colorscales()
-        if colormap not in valid_colormaps:
-            return params, f"Invalid colormap. Choose from: {', '.join(valid_colormaps)}"
-        params['colormap'] = colormap
-    
-    return params, None
-
-def find_closest_column(query: str, available_columns: list) -> str:
-    """
-    Find the closest matching column name using fuzzy matching.
-    
-    Args:
-        query (str): The search term
-        available_columns (list): List of available column names
-        
-    Returns:
-        str: Best matching column name or None
-    """
-    query = query.strip()
-    
-    # Direct match (case-insensitive)
-    for col in available_columns:
-        if col.lower() == query.lower():
-            return col
-    
-    # Fuzzy matching
-    matches = process.extract(
-        query, 
-        available_columns,
-        scorer=fuzz.ratio,  # Use basic ratio matching
-        limit=1
-    )
-    
-    if matches and matches[0][1] >= 80:  # Require 80% similarity
-        return matches[0][0]
-    
-    return None
-
-def process_dataset_mention(message: str, datasets: dict) -> str:
-    """Extract dataset name from message."""
-    message = message.lower()
-    for dataset_name in datasets.keys():
-        if dataset_name.lower() in message:
-            return dataset_name
-    return None
 
 def is_dataset_query(message: str) -> bool:
     """Check if the message is asking about a dataset."""
@@ -3461,7 +3243,7 @@ class BubblePlot(VisualizationType):
         
         # Handle optional parameters
         for param in ['color', 'size']:
-            match = re.search(f'{param}=(\w+)', message)
+            match = re.search(rf'{param}=(\w+)', message)  # Use raw string with f-string
             if match:
                 col = match.group(1)
                 if col not in df.columns:
@@ -3823,7 +3605,7 @@ class GeoMap(VisualizationType):
         
         # Optional parameters
         for param in ['color', 'size']:
-            match = re.search(f'{param}=(\w+)', message)
+            match = re.search(rf'{param}=(\w+)', message)  # Use raw string with f-string
             if match:
                 col = match.group(1)
                 if col not in df.columns:
@@ -5273,16 +5055,6 @@ def update_weaviate_tooltips(state):
     coll_msg = state['collections']['message']
     
     return conn_msg, coll_msg
-
-def serialize_weaviate_object(obj):
-    """Helper to convert Weaviate types to serializable format."""
-    if hasattr(obj, '__class__') and '_WeaviateUUID' in obj.__class__.__name__:
-        return str(obj)
-    elif isinstance(obj, dict):
-        return {k: serialize_weaviate_object(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [serialize_weaviate_object(item) for item in obj]
-    return obj
 
 def generate_query_id(is_original: bool = True, alt_number: Optional[int] = None) -> str:
     """Generate a unique query ID with timestamp.
