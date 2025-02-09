@@ -86,6 +86,15 @@ from weaviate_integration import WeaviateConnection
 from weaviate_manager.query.manager import QueryManager
 import traceback
 
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore', category=Warning)
+
+####################################
+#
+# Initialize Configuration
+#
+####################################
+
 # Find the project root directory (where .env is located)
 project_root = Path(__file__).parent
 dotenv_path = project_root / '.env'
@@ -93,8 +102,78 @@ dotenv_path = project_root / '.env'
 # Try to load from .env file
 load_dotenv(dotenv_path=dotenv_path)
 
-# Suppress warnings for cleaner output
-warnings.filterwarnings('ignore', category=Warning)
+# OpenAI Settings
+if True:  # Toggle for development environment
+    OPENAI_BASE_URL = os.getenv('CBORG_BASE_URL', "https://api.cborg.lbl.gov")
+    OPENAI_API_KEY = os.getenv('CBORG_API_KEY', '')  # Must be set in environment
+else:  # Production environment
+    OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL', 'https://api.openai.com')
+    OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')  # Must be set in environment
+
+# Configuration Constants
+OPENAI_CONFIG = {
+    'api_key': OPENAI_API_KEY,
+    'base_url': OPENAI_BASE_URL
+}
+
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY environment variable must be set")
+
+# Available models
+AVAILABLE_MODELS = [
+    "lbl/cborg-chat:latest", "lbl/cborg-coder:latest", 
+    "lbl/llama", "openai/gpt-4o", "openai/gpt-4o-mini",
+    "openai/o1", "openai/o1-mini", "anthropic/claude-haiku",
+    "anthropic/claude-sonnet", "anthropic/claude-opus", "google/gemini-pro",
+    "google/gemini-flash", "aws/llama-3.1-405b", "aws/llama-3.1-70b",
+    "aws/llama-3.1-8b", "aws/command-r-plus-v1", "aws/command-r-v1"
+]
+
+# Style Constants
+CHAT_STYLES = {
+    'user': {
+        'backgroundColor': '#007bff',
+        'color': 'white',
+        'maxWidth': '75%',
+        'marginLeft': 'auto'
+    },
+    'system': {
+        'backgroundColor': '#dc3545',
+        'color': 'white',
+        'maxWidth': '75%'
+    },
+    'assistant': {
+        'backgroundColor': '#f8f9fa',
+        'maxWidth': '75%'
+    }
+}
+
+####################################
+#
+# Initialize OpenAI client
+#
+####################################
+
+client = openai.OpenAI(**OPENAI_CONFIG)
+main_chat_client= client
+
+####################################
+#
+# Initialize Dash app
+#
+####################################
+
+app = dash.Dash(__name__, external_stylesheets=[
+    dbc.themes.BOOTSTRAP,
+    'https://use.fontawesome.com/releases/v5.15.4/css/all.css'  # Add Font Awesome
+])
+app.config.suppress_callback_exceptions = True
+
+####################################
+#
+# Help Message
+#
+####################################
 
 help_message = """Here's what you can do with this chat interface:
 
@@ -217,51 +296,11 @@ All visualizations feature:
 - Use the modebar tools for additional visualization controls
 """
 
-# OpenAI Settings
-if True:  # Toggle for development environment
-    OPENAI_BASE_URL = os.getenv('CBORG_BASE_URL', "https://api.cborg.lbl.gov")
-    OPENAI_API_KEY = os.getenv('CBORG_API_KEY', '')  # Must be set in environment
-else:  # Production environment
-    OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL', 'https://api.openai.com')
-    OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')  # Must be set in environment
-
-# Configuration Constants
-OPENAI_CONFIG = {
-    'api_key': OPENAI_API_KEY,
-    'base_url': OPENAI_BASE_URL
-}
-
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY environment variable must be set")
-
-# Available models
-AVAILABLE_MODELS = [
-    "lbl/cborg-chat:latest", "lbl/cborg-coder:latest", 
-    "lbl/llama", "openai/gpt-4o", "openai/gpt-4o-mini",
-    "openai/o1", "openai/o1-mini", "anthropic/claude-haiku",
-    "anthropic/claude-sonnet", "anthropic/claude-opus", "google/gemini-pro",
-    "google/gemini-flash", "aws/llama-3.1-405b", "aws/llama-3.1-70b",
-    "aws/llama-3.1-8b", "aws/command-r-plus-v1", "aws/command-r-v1"
-]
-
-# Style Constants
-CHAT_STYLES = {
-    'user': {
-        'backgroundColor': '#007bff',
-        'color': 'white',
-        'maxWidth': '75%',
-        'marginLeft': 'auto'
-    },
-    'system': {
-        'backgroundColor': '#dc3545',
-        'color': 'white',
-        'maxWidth': '75%'
-    },
-    'assistant': {
-        'backgroundColor': '#f8f9fa',
-        'maxWidth': '75%'
-    }
-}
+####################################
+#
+# Index Search Classes
+#
+####################################
 
 # The definition of the text indexer for databases so we can find values in databases   
 class DatabaseTextSearch:
@@ -550,17 +589,12 @@ class DatasetTextSearch:
 text_searcher = DatasetTextSearch()
 text_searcher_db = DatabaseTextSearch()
 
-# Initialize OpenAI client
-client = openai.OpenAI(**OPENAI_CONFIG)
+####################################
+#
+# Chat Management Functions
+#
+####################################
 
-# Initialize Dash app
-app = dash.Dash(__name__, external_stylesheets=[
-    dbc.themes.BOOTSTRAP,
-    'https://use.fontawesome.com/releases/v5.15.4/css/all.css'  # Add Font Awesome
-])
-app.config.suppress_callback_exceptions = True
-
-# Helper Functions
 def create_system_message(dataset_info: List[Dict[str, Any]], 
                          search_query: Optional[str] = None,
                          database_structure: Optional[Dict] = None,
@@ -770,6 +804,12 @@ def create_chat_element(message: dict) -> dbc.Card:
         className="mb-2 ml-auto" if message['role'] == 'user' else "mb-2",
         style=style
     )
+
+####################################
+#
+# Database Management Functions
+#
+####################################
 
 def get_database_files(data_dir='data') -> list:
     """Scan data directory for SQLite database files with validation.
@@ -983,6 +1023,12 @@ def store_successful_query(query_id: str, sql: str, metadata: dict) -> dict:
         }
     }
 
+####################################
+#
+# Layout Functions
+#
+####################################
+
 def create_database_tab():
     """Create the database information tab layout."""
     return html.Div([
@@ -1079,14 +1125,6 @@ def create_dataset_card(name: str, data: Dict[str, Any]) -> dbc.Card:
         className="mb-2",
         id={'type': 'dataset-card-container', 'index': name}
     )
-
-# Add this callback to handle URL fragments
-@app.callback(
-    Output('dataset-tabs', 'active_tab'),
-    Input('url', 'hash')
-)
-def handle_url_fragment(hash_value):
-    return dash.no_update
 
 # Layout
 app.layout = html.Div([
@@ -1302,7 +1340,12 @@ app.layout = html.Div([
     
 ])
 
-# Add custom error handling utilities
+####################################
+#
+# Error Handling Functions
+#
+####################################
+
 def handle_upload_error(filename: str, error: Exception) -> str:
     """
     Generate user-friendly error messages for dataset upload issues.
@@ -1346,7 +1389,12 @@ def validate_dataset(df: pd.DataFrame, filename: str) -> tuple[bool, str]:
         return False, f"Error: {filename} contains duplicate index values"
     return True, ""
 
-# Callback for handling chat input
+####################################
+#
+# Main Chat Input Callback
+#
+####################################
+
 @callback(
     [Output('chat-history', 'children'),
      Output('chat-input', 'value', allow_duplicate=True),
@@ -1374,6 +1422,10 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
             
         chat_history = chat_history or []
         current_message = {'role': 'user', 'content': input_value.strip()}
+
+        # Check for dataset information request
+
+
         
         # Check for threshold refinement
         threshold = extract_threshold_from_message(input_value)
@@ -1655,6 +1707,12 @@ New results (threshold {threshold}): {len(df)} matches
         print(traceback.format_exc())
         return (dash.no_update,) * 7  # Updated for new output
 
+####################################
+#
+# Weaviate Management Functions
+#
+####################################    
+
 def get_weaviate_client():
     """Get or create Weaviate client instance."""
     try:
@@ -1723,6 +1781,12 @@ def execute_weaviate_query(query: str, min_score: float = 0.3) -> dict:
         print(f"Error in execute_weaviate_query: {str(e)}")
         print(f"Error traceback: {traceback.format_exc()}")
         return {}
+
+####################################
+#
+# Chat Management Functions
+#
+####################################
 
 # Download chat history
 @callback(
@@ -1812,6 +1876,24 @@ def process_api_call(chat_history, model):
         chat_elements = create_chat_elements_batch(chat_history)
         return chat_elements, chat_history, '', ""
 
+# Optimize chat message processing
+def create_chat_elements_batch(messages: list) -> list:
+    """
+    Create chat elements in a batch for better performance.
+    
+    Args:
+        messages (list): List of chat messages
+        
+    Returns:
+        list: List of chat element components
+    """
+    return [create_chat_element(msg) for msg in messages]
+
+####################################
+#
+# Dataset Handling Functions
+#
+####################################
 
 # MODIFIED: Upload handler with profile generation
 @callback(
@@ -2237,19 +2319,6 @@ def highlight_selected_dataset(selected_dataset, datasets):
             
     return [styles]
 
-# Optimize chat message processing
-def create_chat_elements_batch(messages: list) -> list:
-    """
-    Create chat elements in a batch for better performance.
-    
-    Args:
-        messages (list): List of chat messages
-        
-    Returns:
-        list: List of chat element components
-    """
-    return [create_chat_element(msg) for msg in messages]
-
 # Optimize dataset search
 def find_mentioned_dataset(input_text: str, dataset_names: list) -> str:
     """
@@ -2265,38 +2334,151 @@ def find_mentioned_dataset(input_text: str, dataset_names: list) -> str:
     input_lower = input_text.lower()
     return next((name for name in dataset_names if name.lower() in input_lower), None)
 
-# Add a new callback to handle the help button
 @callback(
-    [Output('chat-input', 'value', allow_duplicate=True),
-     Output('chat-store', 'data', allow_duplicate=True),
-     Output('chat-history', 'children', allow_duplicate=True)],
-    Input('help-button', 'n_clicks'),
-    [State('chat-store', 'data')],
+    Output('download-selected-datasets', 'data', allow_duplicate=True),
+    Input('download-button', 'n_clicks'),
+    [State('selected-datasets-store', 'data'),
+     State('datasets-store', 'data')],
     prevent_initial_call=True
 )
-def show_help(n_clicks, chat_history):
-    """
-    Show help message in chat when help button is clicked.
-    """
-    if not n_clicks:
-        return dash.no_update, dash.no_update, dash.no_update
+def download_selected_datasets(n_clicks, selected_datasets, all_datasets):
+    """Create zip file with selected datasets and metadata."""
+    if not n_clicks or not selected_datasets:
+        return dash.no_update
+
+    try:
+        # Create temporary zip file
+        with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as temp_zip:
+            with zipfile.ZipFile(temp_zip.name, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                for dataset_name in selected_datasets:
+                    if dataset_name not in all_datasets:
+                        continue
+                    
+                    dataset = all_datasets[dataset_name]
+                    
+                    # Convert data to string before encoding
+                    df = pd.DataFrame(dataset['df'])
+                    tsv_data = df.to_csv(sep='\t', index=False, encoding='utf-8')
+                    zf.writestr(f"{dataset_name}.tsv", tsv_data.encode('utf-8'))
+                    
+                    # Convert metadata to string before encoding
+                    metadata = {
+                        k: v for k, v in dataset['metadata'].items()
+                        if k != 'profile_report'
+                    }
+                    metadata_str = json.dumps(metadata, indent=2, ensure_ascii=False)
+                    zf.writestr(
+                        f"{dataset_name}_metadata.json",
+                        metadata_str.encode('utf-8')
+                    )
+
+        # Read zip file and clean up
+        with open(temp_zip.name, 'rb') as f:
+            content = base64.b64encode(f.read()).decode('utf-8')
+        os.unlink(temp_zip.name)
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"selected_datasets_{timestamp}.zip"
+        
+        return dict(
+            content=content,
+            base64=True,
+            filename=filename,
+            type='application/zip'
+        )
+        
+    except Exception as e:
+        print(f"Error creating zip file: {str(e)}")
+        return dash.no_update
     
-    # Initialize chat history if empty
-    chat_history = chat_history or []
-    
-    # Add help request to chat history
-    chat_history.append({
-        'role': 'user',
-        'content': "What can I do with this chat interface?"
-    })
-    
-    # Add help message response
-    chat_history.append({
-        'role': 'assistant',
-        'content': help_message
-    })
-    
-    return '', chat_history, create_chat_elements_batch(chat_history)
+# Add a callback to manage the selected dataset
+@callback(
+    [Output('selected-dataset-store', 'data'),
+     Output('chat-history', 'children', allow_duplicate=True),
+     Output('chat-store', 'data', allow_duplicate=True),
+     Output('dataset-tabs', 'active_tab', allow_duplicate=True)],
+    [Input({'type': 'dataset-card', 'index': ALL}, 'n_clicks')],
+    [State('datasets-store', 'data'),
+     State('chat-store', 'data')],
+    prevent_initial_call=True
+)
+def handle_dataset_selection(n_clicks, datasets, chat_store):
+    """Handle dataset selection and process any pending plot requests."""
+    if not any(n_clicks):
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        
+    try:
+        # Get the triggered component's ID
+        triggered_id = ctx.triggered[0]['prop_id']
+        
+        # Extract dataset name from the triggered ID
+        dataset_name = None
+        if '"index":"' in triggered_id:
+            dataset_name = triggered_id.split('"index":"')[1].split('"')[0]
+        
+        if not dataset_name or not datasets or dataset_name not in datasets:
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+            
+        # Initialize chat history from store
+        chat_history = chat_store if chat_store else []
+        
+        # Add dataset selection message
+        df = pd.DataFrame(datasets[dataset_name]['df'])
+        info_message = (
+            f"Selected dataset: {dataset_name}\n"
+            f"Number of rows: {len(df)}\n"
+            f"Columns: {', '.join(df.columns)}"
+        )
+        chat_history.append({
+            'role': 'assistant',
+            'content': info_message,
+            'selected_dataset': dataset_name
+        })
+        
+        # Check for unprocessed plot request in the last message only
+        last_message = chat_history[-2] if len(chat_history) >= 2 else None
+        if last_message and last_message.get('plot_request') and not last_message.get('processed'):
+            plot_request = last_message['plot_request']
+            
+            # Process the plot request
+            available_columns = list(df.columns)
+            params, error_msg = extract_plot_params(plot_request, available_columns)
+            
+            if error_msg:
+                chat_history.append({
+                    'role': 'assistant',
+                    'content': f"{error_msg}\n\nAvailable columns are: {', '.join(available_columns)}"
+                })
+                # Mark the request as processed
+                last_message['processed'] = True
+                return dataset_name, create_chat_elements_batch(chat_history), chat_history, 'tab-preview'
+            
+            # Store plot parameters and mark as processed
+            last_message['processed'] = True
+            chat_history.append({
+                'role': 'assistant',
+                'content': (
+                    f"I've set up a bubble plot with:\n"
+                    f"- X: {params['x_column']}\n"
+                    f"- Y: {params['y_column']}\n"
+                    f"- Size: {params['size'] if params['size'] else 'default'}\n"
+                    f"- Color: {params['color'] if params['color'] else 'default'}\n\n"
+                    f"You can view and adjust the plot in the Visualization tab."
+                ),
+                'plot_params': params
+            })
+            
+            return dataset_name, create_chat_elements_batch(chat_history), chat_history, 'tab-viz'
+        
+        # Default behavior: just update dataset selection
+        return dataset_name, create_chat_elements_batch(chat_history), chat_history, 'tab-preview'
+        
+    except Exception as e:
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
 
 # Add new callback to update dataset count and memory usage
 @callback(
@@ -2350,11 +2532,17 @@ def update_dataset_stats(datasets):
     
     return f"({dataset_count})", memory_text
 
+####################################
+#
+# Query Management Functions
+#
+####################################
+
 @callback(
     [Output('chat-history', 'children', allow_duplicate=True),
      Output('chat-input', 'value', allow_duplicate=True),
      Output('chat-store', 'data', allow_duplicate=True),
-     Output('dataset-tabs', 'active_tab', allow_duplicate=True),  # Fix hyphen to underscore
+     Output('dataset-tabs', 'active_tab', allow_duplicate=True),
      Output('viz-state-store', 'data', allow_duplicate=True),
      Output('chat-loading-output', 'children', allow_duplicate=True),
      Output('successful-queries-store', 'data', allow_duplicate=True),
@@ -2366,54 +2554,12 @@ def update_dataset_stats(datasets):
      State('database-state', 'data'),
      State('database-structure-store', 'data'),
      State('successful-queries-store', 'data'),
-     State('datasets-store', 'data')],
+     State('datasets-store', 'data'),
+     State('selected-dataset-store', 'data')],
     prevent_initial_call='initial_duplicate'
 )
-def execute_confirmed_query(input_value, n_clicks, chat_history, database_state, database_structure_store, successful_queries, datasets):
-    """Process chat commands related to SQL query execution and dataset conversion.
-
-    This function handles three main types of operations:
-    1. SQL query execution (e.g., "execute." or "execute query_20240315_123456_original")
-    2. Query-to-dataset conversion (e.g., "convert query_20240315_123456_original to dataset")
-    3. Regular chat processing (all other inputs)
-
-    Args:
-        input_value (str): The user's chat input message
-        n_clicks (int): Number of times send button clicked (for triggering)
-        chat_history (list): List of chat message dictionaries with 'role' and 'content'
-        database_state (dict): Current database connection state including path
-        database_structure_store (dict): Database schema information
-        successful_queries (dict): Store of previously executed queries with metadata
-        datasets (dict): Currently loaded datasets in browser memory
-
-    Returns:
-        tuple: (
-            chat_elements (list): Updated chat interface components
-            input_value (str): Cleared input field
-            chat_history (list): Updated chat history
-            active_tab (str): Tab to display (or dash.no_update)
-            viz_state (dict): Visualization state (or dash.no_update)
-            loading_output (str): Loading indicator state
-            successful_queries (dict): Updated query store
-            datasets (dict): Updated dataset store
-            dataset_list (list): Updated dataset card components
-        )
-
-    Query Storage Format:
-        successful_queries = {
-            'query_20240315_123456_original': {
-                'sql': 'SELECT ...',
-                'metadata': {...}
-            }
-        }
-
-    Dataset Conversion:
-        When converting a query to dataset, creates a new dataset with:
-        - Data from fresh query execution
-        - Metadata including query origin
-        - Statistical profile report
-        - Memory-efficient storage format
-    """
+def execute_confirmed_query(input_value, n_clicks, chat_history, database_state, database_structure_store, successful_queries, datasets, selected_dataset):
+    """Process chat commands related to SQL query execution and dataset conversion."""
     if not input_value:
         return (dash.no_update,) * 9
     
@@ -2422,11 +2568,94 @@ def execute_confirmed_query(input_value, n_clicks, chat_history, database_state,
     chat_history = chat_history or []
     datasets = datasets or {}
     
-    #print(f"Current store state:")
-    #print(f"- Successful queries: {len(successful_queries)} stored")
-    #print(f"- Chat history: {len(chat_history)} messages")
-    #print(f"- Datasets: {len(datasets)} loaded")
-    
+    # Check for dataset information request
+    dataset_query = re.search(r'tell\s+me\s+about\s+my\s+(dataset|datasets)\b', input_value.lower())
+    if dataset_query:
+        chat_history.append({'role': 'user', 'content': input_value})
+        
+        if not datasets:
+            chat_history.append({
+                'role': 'assistant',
+                'content': "No datasets are currently loaded. Please upload a dataset first."
+            })
+            return (
+                create_chat_elements_batch(chat_history),
+                '',
+                chat_history,
+                dash.no_update,
+                dash.no_update,
+                "",
+                successful_queries,
+                dash.no_update,
+                dash.no_update
+            )
+            
+        # Show all datasets unless specifically asking about single dataset and one is selected
+        show_all = dataset_query.group(1) == 'datasets' or not selected_dataset
+        
+        if show_all:
+            # Generate overview of all datasets
+            overview = ["Here are the currently loaded datasets:"]
+            for name, data in datasets.items():
+                df = pd.DataFrame(data['df'])
+                metadata = data['metadata']
+                dataset_info = f"""
+{name}{'  (Selected)' if name == selected_dataset else ''}
+- Source: {metadata['source']}
+- Upload time: {metadata['upload_time']}
+- Rows: {len(df)}
+- Columns: {', '.join(df.columns)}
+"""
+                overview.append(dataset_info)
+            
+            if selected_dataset:
+                overview.append(f"\nCurrently selected dataset: {selected_dataset}")
+            else:
+                overview.append("\nNo dataset is currently selected. Click a dataset name to select it.")
+                
+            chat_history.append({
+                'role': 'assistant',
+                'content': '\n'.join(overview)
+            })
+        else:
+            # Show detailed info for selected dataset
+            df = pd.DataFrame(datasets[selected_dataset]['df'])
+            metadata = datasets[selected_dataset]['metadata']
+            summary = f"""Dataset: {selected_dataset}
+
+Source: {metadata['source']}
+Upload time: {metadata['upload_time']}
+Rows: {len(df)}
+Columns: {', '.join(df.columns)}
+
+Preview:
+```
+{df.head().to_string()}
+```
+
+Data Types:
+{df.dtypes.to_string()}
+
+Summary Statistics:
+{df.describe().to_string()}
+"""
+            chat_history.append({
+                'role': 'assistant',
+                'content': summary
+            })
+            
+        return (
+            create_chat_elements_batch(chat_history),
+            '',
+            chat_history,
+            dash.no_update,
+            dash.no_update,
+            "",
+            successful_queries,
+            dash.no_update,
+            dash.no_update
+        )
+        
     # Check for dataset conversion request
     convert_match = re.search(r'convert\s+((query|lit_query)_\d{8}_\d{6}(?:_original|_alt\d+)?)\s+to\s+dataset', input_value.lower().strip())
     if convert_match:
@@ -2732,6 +2961,52 @@ Would you like to save these results as a dataset?"""
             dash.no_update                            # dataset-list
         )
 
+    
+####################################
+#
+# Help Message Callback
+#
+####################################
+
+# Add a new callback to handle the help button
+@callback(
+    [Output('chat-input', 'value', allow_duplicate=True),
+     Output('chat-store', 'data', allow_duplicate=True),
+     Output('chat-history', 'children', allow_duplicate=True)],
+    Input('help-button', 'n_clicks'),
+    [State('chat-store', 'data')],
+    prevent_initial_call=True
+)
+def show_help(n_clicks, chat_history):
+    """
+    Show help message in chat when help button is clicked.
+    """
+    if not n_clicks:
+        return dash.no_update, dash.no_update, dash.no_update
+    
+    # Initialize chat history if empty
+    chat_history = chat_history or []
+    
+    # Add help request to chat history
+    chat_history.append({
+        'role': 'user',
+        'content': "What can I do with this chat interface?"
+    })
+    
+    # Add help message response
+    chat_history.append({
+        'role': 'assistant',
+        'content': help_message
+    })
+    
+    return '', chat_history, create_chat_elements_batch(chat_history)
+
+####################################
+#
+# Enter Key Handler
+#
+####################################
+
 # Enter key handler - Known limitation: Enter key does not trigger message send
 # This is due to Dash callback chain restrictions. Users must use the Send button.
 app.clientside_callback(
@@ -2761,151 +3036,11 @@ app.clientside_callback(
     prevent_initial_call='initial_duplicate'
 )
 
-@callback(
-    Output('download-selected-datasets', 'data', allow_duplicate=True),
-    Input('download-button', 'n_clicks'),
-    [State('selected-datasets-store', 'data'),
-     State('datasets-store', 'data')],
-    prevent_initial_call=True
-)
-def download_selected_datasets(n_clicks, selected_datasets, all_datasets):
-    """Create zip file with selected datasets and metadata."""
-    if not n_clicks or not selected_datasets:
-        return dash.no_update
-
-    try:
-        # Create temporary zip file
-        with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as temp_zip:
-            with zipfile.ZipFile(temp_zip.name, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
-                for dataset_name in selected_datasets:
-                    if dataset_name not in all_datasets:
-                        continue
-                    
-                    dataset = all_datasets[dataset_name]
-                    
-                    # Convert data to string before encoding
-                    df = pd.DataFrame(dataset['df'])
-                    tsv_data = df.to_csv(sep='\t', index=False, encoding='utf-8')
-                    zf.writestr(f"{dataset_name}.tsv", tsv_data.encode('utf-8'))
-                    
-                    # Convert metadata to string before encoding
-                    metadata = {
-                        k: v for k, v in dataset['metadata'].items()
-                        if k != 'profile_report'
-                    }
-                    metadata_str = json.dumps(metadata, indent=2, ensure_ascii=False)
-                    zf.writestr(
-                        f"{dataset_name}_metadata.json",
-                        metadata_str.encode('utf-8')
-                    )
-
-        # Read zip file and clean up
-        with open(temp_zip.name, 'rb') as f:
-            content = base64.b64encode(f.read()).decode('utf-8')
-        os.unlink(temp_zip.name)
-        
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"selected_datasets_{timestamp}.zip"
-        
-        return dict(
-            content=content,
-            base64=True,
-            filename=filename,
-            type='application/zip'
-        )
-        
-    except Exception as e:
-        print(f"Error creating zip file: {str(e)}")
-        return dash.no_update
-    
-# Add a callback to manage the selected dataset
-@callback(
-    [Output('selected-dataset-store', 'data'),
-     Output('chat-history', 'children', allow_duplicate=True),
-     Output('chat-store', 'data', allow_duplicate=True),
-     Output('dataset-tabs', 'active_tab', allow_duplicate=True)],
-    [Input({'type': 'dataset-card', 'index': ALL}, 'n_clicks')],
-    [State('datasets-store', 'data'),
-     State('chat-store', 'data')],
-    prevent_initial_call=True
-)
-def handle_dataset_selection(n_clicks, datasets, chat_store):
-    """Handle dataset selection and process any pending plot requests."""
-    if not any(n_clicks):
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
-        
-    ctx = dash.callback_context
-    if not ctx.triggered:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
-        
-    try:
-        # Get the triggered component's ID
-        triggered_id = ctx.triggered[0]['prop_id']
-        
-        # Extract dataset name from the triggered ID
-        dataset_name = None
-        if '"index":"' in triggered_id:
-            dataset_name = triggered_id.split('"index":"')[1].split('"')[0]
-        
-        if not dataset_name or not datasets or dataset_name not in datasets:
-            return dash.no_update, dash.no_update, dash.no_update, dash.no_update
-            
-        # Initialize chat history from store
-        chat_history = chat_store if chat_store else []
-        
-        # Add dataset selection message
-        df = pd.DataFrame(datasets[dataset_name]['df'])
-        info_message = (
-            f"Selected dataset: {dataset_name}\n"
-            f"Number of rows: {len(df)}\n"
-            f"Columns: {', '.join(df.columns)}"
-        )
-        chat_history.append({
-            'role': 'assistant',
-            'content': info_message,
-            'selected_dataset': dataset_name
-        })
-        
-        # Check for unprocessed plot request in the last message only
-        last_message = chat_history[-2] if len(chat_history) >= 2 else None
-        if last_message and last_message.get('plot_request') and not last_message.get('processed'):
-            plot_request = last_message['plot_request']
-            
-            # Process the plot request
-            available_columns = list(df.columns)
-            params, error_msg = extract_plot_params(plot_request, available_columns)
-            
-            if error_msg:
-                chat_history.append({
-                    'role': 'assistant',
-                    'content': f"{error_msg}\n\nAvailable columns are: {', '.join(available_columns)}"
-                })
-                # Mark the request as processed
-                last_message['processed'] = True
-                return dataset_name, create_chat_elements_batch(chat_history), chat_history, 'tab-preview'
-            
-            # Store plot parameters and mark as processed
-            last_message['processed'] = True
-            chat_history.append({
-                'role': 'assistant',
-                'content': (
-                    f"I've set up a bubble plot with:\n"
-                    f"- X: {params['x_column']}\n"
-                    f"- Y: {params['y_column']}\n"
-                    f"- Size: {params['size'] if params['size'] else 'default'}\n"
-                    f"- Color: {params['color'] if params['color'] else 'default'}\n\n"
-                    f"You can view and adjust the plot in the Visualization tab."
-                ),
-                'plot_params': params
-            })
-            
-            return dataset_name, create_chat_elements_batch(chat_history), chat_history, 'tab-viz'
-        
-        # Default behavior: just update dataset selection
-        return dataset_name, create_chat_elements_batch(chat_history), chat_history, 'tab-preview'
-        
-    except Exception as e:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+####################################
+#
+# Plot Management Functions
+#
+####################################
 
 class BubblePlotParams:
     def __init__(self):
@@ -4426,7 +4561,6 @@ def update_database_views(structure_data, active_tab, existing_erd):
                             "entityPadding": 15,
                             "useMaxWidth": True
                         },
-                        # Add pan and zoom configuration
                         "maxZoom": 4,
                         "minZoom": 0.2,
                         "zoomScale": 0.5,
@@ -4447,6 +4581,12 @@ def update_database_views(structure_data, active_tab, existing_erd):
             html.P(f"Error generating ERD: {str(e)}", style={'color': 'red'})
         ])
         return summary, error_display, base_style
+
+####################################
+#
+# Weaviate Management Functions
+#
+####################################
 
 @callback(
     [Output('weaviate-summary', 'children'),
@@ -4591,7 +4731,6 @@ def update_weaviate_views(weaviate_state, active_tab):
                             "entityPadding": 15,
                             "useMaxWidth": True
                         },
-                        # Add pan and zoom configuration
                         "maxZoom": 4,
                         "minZoom": 0.2,
                         "zoomScale": 0.5,
@@ -5060,71 +5199,11 @@ def extract_threshold_from_message(message: str) -> Optional[float]:
     
     return None
 
-def test_literature_query_detection():
-    """Test cases for literature query detection."""
-    test_cases = [
-        # Positive cases
-        ("What is known about gene regulation?", True, "gene regulation"),
-        ("Find papers about CRISPR", True, "CRISPR"),
-        ("Search for articles related to metabolic pathways", True, "metabolic pathways"),
-        ("Tell me about the research on bacterial growth", True, "bacterial growth"),
-        ("What papers discuss protein folding", True, "protein folding"),
-        ("Look for literature about DNA repair mechanisms", True, "DNA repair mechanisms"),
-        ("Show me research on synthetic biology", True, "synthetic biology"),
-        # New test cases for biological queries
-        ("Tell me about b. subtilis", True, "tell me about b. subtilis"),
-        ("What is Escherichia coli?", True, "escherichia coli"),
-        ("Find me papers about transposons", True, "transposons"),
-        ("Tell me about the lac operon", True, "lac operon"),
-        ("What are plasmids?", True, "plasmids"),
-        
-        # Negative cases
-        ("Plot temperature vs time", False, None),
-        ("Create a heatmap", False, None),
-        ("What is the average value?", False, None),
-        ("Execute the query", False, None),
-        ("Convert to dataset", False, None)
-    ]
-    
-    results = []
-    for message, expected_is_lit, expected_query in test_cases:
-        is_lit, query = is_literature_query(message)
-        passed = is_lit == expected_is_lit and (query == expected_query if expected_query else True)
-        results.append({
-            'message': message,
-            'expected': (expected_is_lit, expected_query),
-            'got': (is_lit, query),
-            'passed': passed
-        })
-    
-    return results
-
-def test_threshold_extraction():
-    """Test cases for threshold extraction."""
-    test_cases = [
-        ("Use threshold 0.3", 0.3),
-        ("Set cutoff to 0.7", 0.7),
-        ("Apply a threshold of 0.5", 0.5),
-        ("threshold 0.1", 0.1),
-        ("With score 0.8", 0.8),
-        ("Use threshold 1.5", None),  # Invalid - above 1
-        ("Set cutoff to -0.1", None),  # Invalid - below 0
-        ("No threshold here", None),
-        ("Use other settings", None)
-    ]
-    
-    results = []
-    for message, expected in test_cases:
-        got = extract_threshold_from_message(message)
-        passed = got == expected
-        results.append({
-            'message': message,
-            'expected': expected,
-            'got': got,
-            'passed': passed
-        })
-    
-    return results
+####################################
+#
+# Weaviate Management Functions
+#
+####################################
 
 @callback(
     [Output('weaviate-connection-icon', 'style'),
