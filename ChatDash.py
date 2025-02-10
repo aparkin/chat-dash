@@ -48,7 +48,7 @@ Note: All callbacks must remain above the if __name__ == '__main__' block
 """
 
 import dash
-from dash import html, dcc, Input, Output, State, callback, ALL, dash_table
+from dash import html, dcc, Input, Output, State, callback, ALL, dash_table, no_update
 import dash_bootstrap_components as dbc
 import openai
 import os
@@ -87,6 +87,8 @@ from weaviate_manager.query.manager import QueryManager
 import traceback
 from services import registry as service_registry
 from services import ServiceMessage
+from services import initialize_index_search
+from dash.exceptions import PreventUpdate
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore', category=Warning)
@@ -328,15 +330,17 @@ class DatabaseTextSearch:
         self.table_details = {}  # Store detailed value information
         self.index = None
         self.fitted = False
+        self.current_db = None  # Track current database path
         
-    def index_database(self, db_path, db_manager=None):
-        """Index all text content in database tables.
-        
-        Args:
-            db_path: Path to the database
-            db_manager: Optional existing DatabaseManager instance
-        """
+    def update_database(self, db_path, db_manager=None):
+        """Update or create index for a database."""
         try:
+            # Clear all previous data since we only support one database at a time
+            self.table_docs = {}
+            self.table_details = {}
+            self.current_db = None
+            self.fitted = False
+            
             # Use provided DatabaseManager or create new one
             db = db_manager if db_manager is not None else DatabaseManager(db_path)
             
@@ -379,7 +383,7 @@ class DatabaseTextSearch:
                         continue
                     
                     # If we get here, get all values for the text column
-                    key = f"{table_name}.{column}"
+                    key = f"{table_name}.{column}"  # No need for db_path in key anymore
                     query = f"""
                     SELECT "{column}", COUNT(*) as count
                     FROM "{table_name}"
@@ -401,8 +405,18 @@ class DatabaseTextSearch:
                     
                     self.table_docs[key] = doc
             
+            # Update current database path
+            self.current_db = db_path
+            
             # Create search index
             self._create_index()
+            
+            print(f"\n=== Database Indexing Summary ===")
+            print(f"Database: {db_path}")
+            print(f"Tables indexed: {len(tables)}")
+            print(f"Total columns indexed: {len(self.table_docs)}")
+            for key in self.table_docs.keys():
+                print(f"- {key}: {self.table_details[key]['total_unique']} unique values")
             
         except Exception as e:
             print(f"Error indexing database: {str(e)}")
@@ -422,13 +436,22 @@ class DatabaseTextSearch:
     def search_text(self, query: str, threshold: float = 0.9, coverage = 0.0) -> list:
         """Search for text in database content."""
         if not self.fitted:
+            print("Warning: Database searcher not fitted")
             return []
             
         try:
             search_term = query.lower().replace("'", "").replace('"', '').strip()
+            print(f"\n=== Database Search Debug ===")
+            print(f"Query: '{search_term}'")
+            print(f"Threshold: {threshold}")
+            print(f"Coverage: {coverage}")
+            print(f"Current DB: {self.current_db}")
+            print(f"Total indexed columns: {len(self.table_docs)}")
+            
             results = []
             
             for table_col, details in self.table_details.items():
+                print(f"\nChecking {table_col}...")
                 table, column = table_col.split('.')
                 matches = []
                 
@@ -441,6 +464,7 @@ class DatabaseTextSearch:
                     
                     if ratio > threshold * 100 and len(str_value)/len(search_term) > coverage:
                         matches.append((value, ratio))
+                        print(f"- Match: '{value}' (score: {ratio})")
                 
                 if matches:
                     # Sort matches by similarity ratio
@@ -465,6 +489,12 @@ class DatabaseTextSearch:
                         'counts': {m: details['value_counts'].get(m, 0) for m in matched_values},
                         'similarities': {m: ratio for m, ratio in matches}
                     }
+            
+            print(f"\nTotal results: {len(results)}")
+            for result in results:
+                print(f"\nTable: {result['source_name']}")
+                for col, details in result['details'].items():
+                    print(f"- Column {col}: {len(details['matches'])} matches")
             
             return results
                     
@@ -604,6 +634,9 @@ class DatasetTextSearch:
 # Initialize the text searchers for datasets and databases  
 text_searcher = DatasetTextSearch()
 text_searcher_db = DatabaseTextSearch()
+
+# Initialize index search service with available searchers
+initialize_index_search(text_searcher, text_searcher_db)
 
 ####################################
 #
@@ -1571,11 +1604,16 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                     temperature=0.4,
                     max_tokens=8192
                 )
+
+                llm_response = llm_response.choices[0].message.content
+                # Process SQL blocks if present
+                if '```sql' in llm_response.lower():
+                    llm_response = add_query_ids_to_response(llm_response)
                 
                 # Add LLM response to chat
                 chat_history.append({
                     'role': 'assistant',
-                    'content': llm_response.choices[0].message.content
+                    'content': llm_response
                 })
                 
                 # Update stores if needed
@@ -1616,155 +1654,8 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
             handler[1].name == "literature" 
             for handler in service_registry.detect_handlers(input_value)
         )
-        
-        if not literature_service_handled:
-            # Check for threshold refinement
-            threshold = extract_threshold_from_message(input_value)
-            query_id = extract_query_id_from_message(input_value) if threshold else None
-            
-            if threshold is not None and query_id is not None:
-                print(f"\n=== Processing Threshold Refinement (Legacy) ===")
-                print(f"Query ID: {query_id}")
-                print(f"New threshold: {threshold}")
-                
-                
-                chat_history.append(current_message)
-                
-                if query_id not in successful_queries:
-                    chat_history.append({
-                        'role': 'assistant',
-                        'content': f"❌ Query {query_id} not found in history."
-                    })
-                    return (
-                        create_chat_elements_batch(chat_history),
-                        '',
-                        chat_history,
-                        dash.no_update,
-                        dash.no_update,
-                        "",
-                        successful_queries
-                    )
-                
-                try:
-                    stored_query = successful_queries[query_id]
-                    original_query = stored_query['query']
                     
-                    # Execute query with new threshold
-                    weaviate_results = execute_weaviate_query(original_query, min_score=threshold)
-                    if not weaviate_results or not weaviate_results.get('unified_results'):
-                        raise Exception("No results found with new threshold")
-                    
-                    # Transform and store results
-                    df = transform_weaviate_results(weaviate_results)
-                    new_query_id = generate_literature_query_id(original_query, threshold)
-                    
-                    successful_queries[new_query_id] = {
-                        'query': original_query,
-                        'threshold': threshold,
-                        'dataframe': df.to_dict('records'),
-                        'metadata': {
-                            'execution_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                            'total_results': len(df),
-                            'query_info': df.attrs.get('query_info', {}),
-                            'summary': df.attrs.get('summary', {})
-                        }
-                    }
-                    
-                    # Format response with comparison
-                    old_df = pd.DataFrame(stored_query['dataframe'])
-                    response = f"""Refined search results:
-
-    Previous results (threshold {stored_query['threshold']}): {len(old_df)} matches
-    New results (threshold {threshold}): {len(df)} matches
-
-    {format_literature_preview(df, new_query_id, threshold)}"""
-                    
-                    chat_history.append({
-                        'role': 'assistant',
-                        'content': response
-                    })
-                    
-                    return (
-                        create_chat_elements_batch(chat_history),
-                        '',
-                        chat_history,
-                        dash.no_update,
-                        dash.no_update,
-                        "",
-                        successful_queries
-                    )
-                    
-                except Exception as e:
-                    error_msg = f"Error refining query: {str(e)}"
-                    print(error_msg)
-                    chat_history.append({
-                        'role': 'assistant',
-                        'content': f"❌ {error_msg}"
-                    })
-                    return (
-                        create_chat_elements_batch(chat_history),
-                        '',
-                        chat_history,
-                        dash.no_update,
-                        dash.no_update,
-                        "",
-                        successful_queries
-                    )
-        
-
-            
         chat_history.append(current_message)
-        
-        # Add visualization detection early in the flow
-        viz_handler = VisualizationHandler()
-        viz_type = viz_handler.detect_type(input_value)
-        
-        if viz_type:
-            # Check for available datasets
-            if not datasets:
-                chat_history.append({
-                    'role': 'assistant',
-                    'content': f"Note: Detected a {viz_type} visualization request, but no datasets are currently loaded. Please load a dataset first."
-                })
-            elif not selected_dataset:
-                chat_history.append({
-                    'role': 'assistant',
-                    'content': f"Note: Detected a {viz_type} visualization request, but no dataset is selected. Please select a dataset first."
-                })
-            else:
-                # Process visualization request
-                df = pd.DataFrame(datasets[selected_dataset]['df'])
-                viz_state, error = viz_handler.process_request(input_value, df)
-                
-                if error:
-                    chat_history.append({
-                        'role': 'assistant',
-                        'content': f"Visualization error: {error}"
-                    })
-                    return (
-                        create_chat_elements_batch(chat_history),
-                        '',
-                        chat_history,
-                        dash.no_update,
-                        dash.no_update,
-                        "",
-                        dash.no_update  # No store update needed
-                    )
-                
-                chat_history.append({
-                    'role': 'assistant',
-                    'content': f"Creating {viz_type} visualization. Switching to visualization tab."
-                })
-                
-                return (
-                    create_chat_elements_batch(chat_history),
-                    '',
-                    chat_history,
-                    'tab-viz',  # Switch to visualization tab
-                    viz_state,  # Update visualization state
-                    "",
-                    successful_queries  # Add the store to all returns
-                )
         
         # Create system message with all available context
         system_message = create_system_message(
@@ -1776,7 +1667,7 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
             } for name, data in datasets.items()] if datasets else [],
             database_structure=database_structure_store
         )
-        
+
         # Smart context selection
         def get_relevant_context(current_msg: dict, history: list, max_context: int = 6) -> list:
             """Select relevant context messages, preserving order and relationships."""
@@ -1813,40 +1704,7 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                     
             return context
         
-        # Handle search queries
-        if not literature_service_handled and is_search_query(input_value):
-            print("\n=== Processing Search Query ===")
-            search_results, successful_queries = search_all_sources(input_value, successful_queries=successful_queries)
-            
-            # Add search results to chat history
-            search_summary = format_search_results(search_results)
-            chat_history.append({'role': 'assistant', 'content': search_summary})
-            
-            # Get LLM interpretation with relevant context
-            context = get_relevant_context(current_message, chat_history)
-            messages = [
-                {'role': 'system', 'content': system_message},
-                *[{'role': msg['role'], 'content': str(msg['content'])} for msg in context],
-                {'role': 'assistant', 'content': search_summary},
-                {'role': 'user', 'content': "Please analyze these results and suggest relevant SQL queries if appropriate."}
-            ]
-            
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.4,
-                max_tokens=8192
-            )
-            
-            ai_response = response.choices[0].message.content
-            
-            # Process SQL blocks if present
-            if '```sql' in ai_response.lower():
-                ai_response = add_query_ids_to_response(ai_response)
-            
-            chat_history.append({'role': 'assistant', 'content': ai_response})
-            
-        else:
+        if True:
             # Handle non-search queries
             context = get_relevant_context(current_message, chat_history)
             messages = [
@@ -3163,19 +3021,6 @@ app.clientside_callback(
     prevent_initial_call='initial_duplicate'
 )
 
-####################################
-#
-# Plot Management Functions
-#
-####################################
-
-def is_plot_request(message: str) -> bool:
-    """Check if the message is requesting a plot."""
-
-    plot_keywords = ['plot', 'graph', 'visualize', 'show', 'display']
-    message = message.lower()
-    return any(keyword in message for keyword in plot_keywords)
-
 def is_dataset_query(message: str) -> bool:
     """Check if the message is asking about a dataset."""
     query_patterns = [
@@ -3188,856 +3033,6 @@ def is_dataset_query(message: str) -> bool:
     ]
     message = message.lower()
     return any(pattern in message for pattern in query_patterns)
-
-class VisualizationType:
-    """Base class for visualization types with standard interface."""
-    def __init__(self):
-        self.required_params = set()
-        self.optional_params = set()
-        
-    def validate_params(self, params: dict, df: pd.DataFrame) -> Tuple[bool, str]:
-        """Validate parameters against requirements and dataframe."""
-        missing = self.required_params - set(params.keys())
-        if missing:
-            return False, f"Missing required parameters: {', '.join(missing)}"
-        return True, ""
-        
-    def extract_params(self, message: str, df: pd.DataFrame) -> Tuple[dict, str]:
-        """Extract parameters from message. Must be implemented by subclasses."""
-        raise NotImplementedError("Subclasses must implement extract_params")
-        
-    def create_figure(self, params: dict, df: pd.DataFrame) -> go.Figure:
-        """Create the visualization figure. Must be implemented by subclasses."""
-        raise NotImplementedError("Subclasses must implement create_figure")
-
-class BubblePlot(VisualizationType):
-    def __init__(self):
-        super().__init__()
-        self.required_params = {'x_column', 'y_column'}
-        self.optional_params = {'size', 'color'}
-    
-    def extract_params(self, message: str, df: pd.DataFrame) -> Tuple[dict, str]:
-        """Extract plot parameters supporting both x/y and vs syntaxes."""
-        params = {}
-        
-        # Try x=, y= syntax first
-        x_match = re.search(r'x=(\w+)', message)
-        y_match = re.search(r'y=(\w+)', message)
-        
-        if x_match and y_match:
-            x_col = x_match.group(1)
-            y_col = y_match.group(1)
-        else:
-            # Try vs/versus/against syntax
-            vs_match = re.search(r'plot\s+(\w+)\s+(?:vs|versus|against)\s+(\w+)', message)
-            if not vs_match:
-                return {}, "Could not parse plot parameters"
-            y_col = vs_match.group(1)
-            x_col = vs_match.group(2)
-        
-        if x_col not in df.columns or y_col not in df.columns:
-            return {}, f"Column not found: {x_col if x_col not in df.columns else y_col}"
-            
-        params['x_column'] = x_col
-        params['y_column'] = y_col
-        
-        # Handle optional parameters
-        for param in ['color', 'size']:
-            match = re.search(rf'{param}=(\w+)', message)  # Use raw string with f-string
-            if match:
-                col = match.group(1)
-                if col not in df.columns:
-                    return {}, f"{param.capitalize()} column not found: {col}"
-                params[param] = col
-                
-        return params, None
-    
-    def create_figure(self, params: dict, df: pd.DataFrame) -> go.Figure:
-        """Create bubble plot figure."""
-        try:
-            # Process size parameter
-            if params.get('size'):
-                if params['size'] in df.columns:
-                    # Column-based size
-                    size_values = df[params['size']]
-                    marker_size = 10 + 40 * (size_values - size_values.min()) / (size_values.max() - size_values.min())
-                else:
-                    # Static size - try to convert to number
-                    try:
-                        marker_size = float(params['size'])
-                    except (ValueError, TypeError):
-                        marker_size = 20  # Default if conversion fails
-            else:
-                marker_size = 20
-            
-            # Process color parameter
-            color_values = None
-            color_discrete = False
-            colormap = 'viridis'  # Default colormap for numeric data
-            
-            if params.get('color'):
-                if params['color'] in df.columns:
-                    color_values = df[params['color']]
-                    if pd.api.types.is_numeric_dtype(color_values):
-                        color_discrete = False
-                    else:
-                        color_discrete = True
-                        unique_values = color_values.nunique()
-                        color_sequence = generate_colors(unique_values)
-                else:
-                    # Check if it's a valid color specification
-                    if is_valid_color(params['color']):
-                        color_values = params['color']
-                    else:
-                        color_values = 'blue'  # Default color
-            
-            # Create the plot
-            fig = px.scatter(
-                df,
-                x=params['x_column'],
-                y=params['y_column'],
-                size=marker_size if isinstance(marker_size, pd.Series) else None,
-                color=color_values if isinstance(color_values, pd.Series) else None,
-                color_continuous_scale=None if color_discrete else colormap,
-                color_discrete_sequence=color_sequence if color_discrete else None,
-                title=f'Bubble Plot: {params["y_column"]} vs {params["x_column"]}'
-            )
-            
-            # Update markers for static values
-            if not isinstance(marker_size, pd.Series):
-                fig.update_traces(marker=dict(size=marker_size))
-            if not isinstance(color_values, pd.Series) and color_values is not None:
-                fig.update_traces(marker=dict(color=color_values))
-            
-            # Improve layout
-            fig.update_layout(
-                plot_bgcolor='white',
-                paper_bgcolor='white',
-                margin=dict(l=40, r=40, t=40, b=40),
-                xaxis=dict(
-                    showgrid=True,
-                    gridwidth=1,
-                    gridcolor='LightGray',
-                    title=params['x_column']
-                ),
-                yaxis=dict(
-                    showgrid=True,
-                    gridwidth=1,
-                    gridcolor='LightGray',
-                    title=params['y_column']
-                ),
-                # Add configuration for better interactivity
-                dragmode='pan',  # Enable panning by default
-                modebar=dict(
-                    orientation='h',  # Horizontal orientation
-                    bgcolor='rgba(255,255,255,0.7)',
-                    color='rgb(128,128,128)',
-                    activecolor='rgb(50,50,50)'
-                ),
-                # Disable selection by default
-                selectdirection=None,
-                clickmode='event',  # Changed from 'event+select'
-                hovermode='closest'
-            )
-            
-            return fig
-            
-        except Exception as e:
-            raise Exception(f"Error creating bubble plot: {str(e)}")
-
-class HeatmapPlot(VisualizationType):
-    """Heatmap plot implementation using existing logic."""
-    def __init__(self):
-        super().__init__()
-        self.required_params = {'columns'}
-        self.optional_params = {'rows', 'standardize', 'cluster', 'colormap', 'transpose', 'fcol'}  # Added fcol
-    
-    def extract_params(self, message: str, df: pd.DataFrame) -> Tuple[dict, str]:
-        """Extract heatmap parameters with regex support for rows/columns."""
-        # Initialize params with default values (no default colormap)
-        params = {
-            'transpose': False,
-            'standardize': None,
-            'cluster': None,
-            'colormap': None,
-            'fcol': None  # Added fcol initialization
-        }
-        
-        # Define valid parameter names
-        valid_params = {'columns', 'rows', 'standardize', 'cluster', 'colormap', 'transpose', 'fcol'}  # Added fcol
-        
-        # Find all parameter assignments in the message
-        param_matches = re.finditer(r'(\w+)=([^\s]+)', message)
-        unknown_params = []
-        
-        for match in param_matches:
-            param_name = match.group(1)
-            if param_name not in valid_params:
-                unknown_params.append(param_name)
-        
-        if unknown_params:
-            return {}, f"Unknown parameter(s): {', '.join(unknown_params)}. Valid parameters are: {', '.join(sorted(valid_params))}"
-        
-        # Extract columns parameter with better error handling
-        if 'columns=' in message:
-            cols_match = re.search(r'columns=\[(.*?)\]', message)
-            cols_regex_match = re.search(r'columns=(\S+)', message)
-            
-            if not (cols_match or cols_regex_match):
-                return {}, "Malformed columns parameter. Use format: columns=[col1,col2,...] or columns=regex_pattern"
-            
-            if cols_match:
-                cols = [c.strip() for c in cols_match.group(1).split(',')]
-                if not cols:
-                    return {}, "Empty column list provided"
-                invalid_cols = [col for col in cols if col not in df.columns]
-                if invalid_cols:
-                    return {}, f"Column(s) not found in dataset: {', '.join(invalid_cols)}"
-                params['columns'] = cols
-            elif cols_regex_match:
-                pattern = cols_regex_match.group(1)
-                try:
-                    regex = re.compile(pattern)
-                    matching_cols = [col for col in df.columns if regex.search(col)]
-                    if not matching_cols:
-                        return {}, f"Column regex '{pattern}' matched no columns in dataset"
-                    params['columns'] = matching_cols
-                except re.error:
-                    return {}, f"Invalid regex pattern for columns: '{pattern}'"
-        else:
-            params['columns'] = list(df.columns)  # Default to all columns
-        
-        # Extract rows parameter with regex and fcol support
-        if 'rows=' in message:
-            rows_match = re.search(r'rows=\[(.*?)\]', message)
-            rows_regex_match = re.search(r'rows=(\S+)', message)
-            
-            if not (rows_match or rows_regex_match):
-                return {}, "Malformed rows parameter. Use format: rows=[row1,row2,...] or rows=regex_pattern fcol=column_name"
-            
-            if rows_match:
-                rows = [r.strip() for r in rows_match.group(1).split(',')]
-                if not rows:
-                    return {}, "Empty row list provided"
-                invalid_rows = [row for row in rows if row not in df.columns]
-                if invalid_rows:
-                    return {}, f"Row(s) not found in dataset: {', '.join(invalid_rows)}"
-                params['rows'] = rows
-            else:  # Using regex pattern
-                fcol_match = re.search(r'fcol=(\w+)', message)
-                if not fcol_match:
-                    return {}, "When using regex for rows, must specify fcol=column_name to filter on"
-                
-                fcol = fcol_match.group(1)
-                if fcol not in df.columns:
-                    return {}, f"Filter column '{fcol}' not found in dataset"
-                
-                pattern = rows_regex_match.group(1)
-                try:
-                    regex = re.compile(pattern)
-                    # Filter the dataframe based on the regex pattern in fcol
-                    filtered_indices = df[df[fcol].astype(str).str.match(regex)].index.tolist()
-                    if not filtered_indices:
-                        return {}, f"Row regex '{pattern}' matched no values in column '{fcol}'"
-                    # Store the filtered indices and filter column instead of the DataFrame
-                    params['row_indices'] = filtered_indices
-                    params['fcol'] = fcol
-                except re.error:
-                    return {}, f"Invalid regex pattern for rows: '{pattern}'"
-        
-        # Standardize parameter - strict validation
-        std_match = re.search(r'standardize=(\w+)', message)
-        if std_match:
-            std_value = std_match.group(1).lower()
-            if std_value not in ['rows', 'columns']:
-                return {}, f"Invalid value for standardize: '{std_value}'. Must be 'rows' or 'columns'"
-            params['standardize'] = std_value
-        
-        # Cluster parameter - strict validation
-        cluster_match = re.search(r'cluster=(\w+)', message)
-        if cluster_match:
-            cluster_value = cluster_match.group(1).lower()
-            if cluster_value not in ['rows', 'columns', 'both']:
-                return {}, f"Invalid value for cluster: '{cluster_value}'. Must be 'rows', 'columns', or 'both'"
-            params['cluster'] = cluster_value
-        
-        # Colormap parameter - strict validation with sorted options
-        colormap_match = re.search(r'colormap=(\w+)', message)
-        if colormap_match:
-            colormap = colormap_match.group(1)
-            valid_colormaps = sorted(px.colors.named_colorscales())
-            if colormap not in valid_colormaps:
-                return {}, f"Invalid colormap: '{colormap}'. Valid options (alphabetically):\n{', '.join(valid_colormaps)}"
-            params['colormap'] = colormap
-        
-        # Transpose parameter - strict validation
-        transpose_match = re.search(r'transpose=(\w+)', message)
-        if transpose_match:
-            transpose_value = transpose_match.group(1).lower()
-            if transpose_value not in ['true', 'false']:
-                return {}, f"Invalid value for transpose: '{transpose_value}'. Must be 'true' or 'false'"
-            params['transpose'] = transpose_value == 'true'
-        elif 'transpose' in message.lower():
-            params['transpose'] = True
-        
-        return params, None
-
-    def create_figure(self, params: dict, df: pd.DataFrame) -> go.Figure:
-        """Create heatmap figure."""
-        try:
-            # Preprocess the data
-            data, clustering_info = preprocess_heatmap_data(df, params)
-            
-            # Determine if we should center the colorscale
-            center_scale = params.get('standardize') is not None
-            if center_scale:
-                max_abs = max(abs(data.values.min()), abs(data.values.max()))
-                zmin, zmax = -max_abs, max_abs
-                colorscale = 'RdBu_r'  # Red-Blue diverging colormap for centered data
-            else:
-                zmin, zmax = data.values.min(), data.values.max()
-                colorscale = params.get('colormap', 'viridis')
-            
-            # Create the figure
-            fig = go.Figure()
-            
-            # Add heatmap trace
-            heatmap = go.Heatmap(
-                z=data.values,
-                x=clustering_info['col_labels'],
-                y=clustering_info['row_labels'],
-                colorscale=colorscale,
-                zmid=0 if center_scale else None,
-                zmin=zmin,
-                zmax=zmax,
-                colorbar=dict(
-                    title='Standardized Value' if params.get('standardize') else 'Value',
-                    titleside='right'
-                ),
-                hoverongaps=False,
-                hovertemplate=(
-                    'Row: %{y}<br>' +
-                    'Column: %{x}<br>' +
-                    ('Standardized Value: %{z:.2f}<br>' if params.get('standardize') else 'Value: %{z:.2f}<br>') +
-                    '<extra></extra>'
-                )
-            )
-            fig.add_trace(heatmap)
-            
-            # Update layout
-            title_parts = []
-            if params.get('standardize'):
-                title_parts.append(f"Standardized by {params['standardize']}")
-            if params.get('cluster'):
-                title_parts.append(f"Clustered by {params['cluster']}")
-            if params.get('transpose'):
-                title_parts.append("Transposed")
-            
-            title = "Heatmap" + (f" ({', '.join(title_parts)})" if title_parts else "")
-            
-            fig.update_layout(
-                title=title,
-                xaxis=dict(
-                    title='',
-                    tickangle=45,
-                    showgrid=False,
-                    ticktext=clustering_info['col_labels'],
-                    tickvals=list(range(len(clustering_info['col_labels'])))
-                ),
-                yaxis=dict(
-                    title='',
-                    showgrid=False,
-                    side='left',
-                    ticktext=clustering_info['row_labels'],
-                    tickvals=list(range(len(clustering_info['row_labels'])))
-                ),
-                margin=dict(
-                    l=100,
-                    r=50,
-                    t=50,
-                    b=100
-                ),
-                # Add configuration for better interactivity
-                dragmode='pan',  # Enable panning by default
-                modebar=dict(
-                    orientation='h',  # Horizontal orientation
-                    bgcolor='rgba(255,255,255,0.7)',
-                    color='rgb(128,128,128)',
-                    activecolor='rgb(50,50,50)'
-                ),
-                # Disable selection by default
-                selectdirection=None,
-                clickmode='event',  # Changed from 'event+select'
-                hovermode='closest'
-            )
-            
-            return fig
-            
-        except Exception as e:
-            raise Exception(f"Error creating heatmap: {str(e)}")
-
-class GeoMap(VisualizationType):
-    """Geographic map visualization implementation using existing logic."""
-    def __init__(self):
-        super().__init__()
-        self.required_params = {'latitude', 'longitude'}
-        self.optional_params = {'size', 'color'}
-    
-    def extract_params(self, message: str, df: pd.DataFrame) -> Tuple[dict, str]:
-        """Extract map parameters."""
-        params = {}
-        
-        # Required parameters
-        lat_match = re.search(r'latitude=(\w+)', message)
-        lon_match = re.search(r'longitude=(\w+)', message)
-        
-        if not (lat_match and lon_match):
-            return {}, "Map requires both latitude and longitude parameters"
-        
-        lat_col = lat_match.group(1)
-        lon_col = lon_match.group(1)
-        
-        if lat_col not in df.columns or lon_col not in df.columns:
-            return {}, f"Column not found: {lat_col if lat_col not in df.columns else lon_col}"
-        
-        params['latitude'] = lat_col
-        params['longitude'] = lon_col
-        
-        # Optional parameters
-        for param in ['color', 'size']:
-            match = re.search(rf'{param}=(\w+)', message)  # Use raw string with f-string
-            if match:
-                col = match.group(1)
-                if col not in df.columns:
-                    return {}, f"{param.capitalize()} column not found: {col}"
-                params[param] = col
-        
-        return params, None
-
-    def create_figure(self, params: dict, df: pd.DataFrame) -> go.Figure:
-        """Create geographic map visualization.
-        
-        Args:
-            params: Dictionary containing:
-                - latitude: Column name for latitude values
-                - longitude: Column name for longitude values
-                - size: Optional column name or value for point sizes
-                - color: Optional column name or value for point colors
-            df: DataFrame containing the data
-            
-        Returns:
-            Plotly figure object
-            
-        Raises:
-            Exception: If required parameters are missing or invalid
-        """
-        try:
-            # Validate required columns
-            for param in ['latitude', 'longitude']:
-                if param not in params:
-                    raise Exception(f"Missing required parameter: {param}")
-                if params[param] not in df.columns:
-                    raise Exception(f"Column not found: {params[param]}")
-                    
-            # Extract coordinates
-            lat = df[params['latitude']]
-            lon = df[params['longitude']]
-            
-            # Handle invalid coordinates
-            valid_coords = (
-                lat.between(-90, 90) & 
-                lon.between(-180, 180) & 
-                lat.notna() & 
-                lon.notna()
-            )
-            
-            if not valid_coords.any():
-                raise Exception("No valid coordinates found in data")
-                
-            if (~valid_coords).any():
-                print(f"Warning: {(~valid_coords).sum()} invalid coordinates removed")
-                df = df[valid_coords].copy()
-                lat = lat[valid_coords]
-                lon = lon[valid_coords]
-            
-            # Process size parameter
-            if params.get('size'):
-                if params['size'] in df.columns:
-                    # Column-based size
-                    size_values = df[params['size']]
-                    if not pd.to_numeric(size_values, errors='coerce').notna().all():
-                        raise Exception(f"Size column '{params['size']}' must contain numeric values")
-                    # Scale sizes for better visualization
-                    size_min, size_max = 10, 50  # Reasonable size range
-                    marker_size = size_min + (size_max - size_min) * (
-                        (size_values - size_values.min()) / 
-                        (size_values.max() - size_values.min())
-                    )
-                else:
-                    # Static size - try to convert to number
-                    try:
-                        marker_size = float(params['size'])
-                    except (ValueError, TypeError):
-                        marker_size = 15  # Default if conversion fails
-            else:
-                marker_size = 15  # Default size
-            
-            # Process color parameter
-            if params.get('color'):
-                if params['color'] in df.columns:
-                    color_values = df[params['color']]
-                    if pd.api.types.is_numeric_dtype(color_values):
-                        # Numeric color scale
-                        marker_color = color_values
-                        colorscale = 'viridis'
-                    else:
-                        # Categorical colors
-                        unique_values = color_values.unique()
-                        color_sequence = generate_colors(len(unique_values))
-                        color_map = dict(zip(unique_values, color_sequence))
-                        marker_color = [color_map[val] for val in color_values]
-                        colorscale = None
-                else:
-                    # Static color
-                    marker_color = params['color'] if is_valid_color(params['color']) else 'blue'
-                    colorscale = None
-            else:
-                marker_color = 'blue'
-                colorscale = None
-            
-            # Create the map
-            fig = go.Figure()
-            
-            # Add scatter mapbox trace
-            scatter_kwargs = {
-                'lat': lat,
-                'lon': lon,
-                'mode': 'markers',
-                'marker': {
-                    'size': marker_size,
-                    'color': marker_color,
-                },
-                'text': [
-                    f"Latitude: {lat:.4f}<br>"
-                    f"Longitude: {lon:.4f}<br>"
-                    + (f"{params['size']}: {size}<br>" if params.get('size') in df.columns else "")
-                    + (f"{params['color']}: {color}<br>" if params.get('color') in df.columns else "")
-                    for lat, lon, size, color in zip(
-                        lat, lon,
-                        df[params['size']] if params.get('size') in df.columns else [None] * len(lat),
-                        df[params['color']] if params.get('color') in df.columns else [None] * len(lat)
-                    )
-                ],
-                'hoverinfo': 'text'
-            }
-            
-            # Add colorscale if using numeric or categorical colors
-            if params.get('color') in df.columns:
-                if pd.api.types.is_numeric_dtype(df[params['color']]):
-                    scatter_kwargs['marker']['colorscale'] = colorscale
-                    scatter_kwargs['marker']['colorbar'] = dict(
-                        title=params['color'],
-                        titleside='right',
-                        thickness=20,
-                        len=0.9,
-                        x=0.02,  # Move colorbar to the left side
-                        xpad=0
-                    )
-                    scatter_kwargs['marker']['showscale'] = True
-                else:
-                    # For categorical data, create a discrete color scale
-                    unique_values = sorted(df[params['color']].unique())
-                    color_sequence = generate_colors(len(unique_values))
-                    color_map = dict(zip(unique_values, color_sequence))
-                    scatter_kwargs['marker']['color'] = [color_map[val] for val in df[params['color']]]
-                    # Add a legend instead of colorbar for categorical data
-                    scatter_kwargs['showlegend'] = True
-                    scatter_kwargs['name'] = params['color']  # This will show in the legend
-                    # Create separate traces for legend entries
-                    for val, color in color_map.items():
-                        fig.add_trace(go.Scattermapbox(
-                            lat=[None],
-                            lon=[None],
-                            mode='markers',
-                            marker=dict(size=10, color=color),
-                            name=str(val),
-                            showlegend=True,
-                            hoverinfo='skip'
-                        ))
-                
-            fig.add_trace(go.Scattermapbox(**scatter_kwargs))
-            
-            # Update layout for mapbox
-            center_lat = lat.mean()
-            center_lon = lon.mean()
-            
-            # Calculate zoom based on coordinate spread
-            lat_range = lat.max() - lat.min()
-            lon_range = lon.max() - lon.min()
-            zoom = 12 - max(lat_range, lon_range)  # Adjust zoom based on spread
-            zoom = max(1, min(20, zoom))  # Ensure zoom is within valid range
-            
-            fig.update_layout(
-                mapbox=dict(
-                    style='carto-positron',  # Light, clean map style
-                    center=dict(lat=center_lat, lon=center_lon),
-                    zoom=zoom
-                ),
-                margin=dict(l=0, r=0, t=30, b=0),
-                title=dict(
-                    text="Geographic Distribution",
-                    x=0.5,
-                    xanchor='center'
-                ),
-                # Add configuration for better interactivity
-                dragmode='pan',  # Enable panning by default
-                modebar=dict(
-                    orientation='h',  # Horizontal orientation
-                    bgcolor='rgba(255,255,255,0.7)',
-                    color='rgb(128,128,128)',
-                    activecolor='rgb(50,50,50)'
-                ),
-                legend=dict(
-                    yanchor="top",
-                    y=0.99,
-                    xanchor="right",
-                    x=0.99,
-                    bgcolor='rgba(255,255,255,0.7)'
-                ),
-                # Disable selection by default
-                selectdirection=None
-            )
-            
-            # Add configuration for enhanced interactivity
-            fig.update_layout(
-                clickmode='event',  # Changed from 'event+select'
-                hovermode='closest'
-            )
-            
-            # Enable all interactions including scroll zoom
-            fig.update_layout(
-                mapbox_style="carto-positron",  # Ensure consistent style
-                mapbox=dict(
-                    center=dict(lat=center_lat, lon=center_lon),
-                    zoom=zoom,
-                    pitch=0,  # Start with top-down view
-                    bearing=0  # Start facing north
-                )
-            )
-            
-            return fig
-            
-        except Exception as e:
-            raise Exception(f"Error creating map: {str(e)}")
-
-class VisualizationHandler:
-    def __init__(self):
-        self.viz_types = {
-            'bubble': BubblePlot(),
-            'heatmap': HeatmapPlot(),
-            'map': GeoMap()
-        }
-    
-    def detect_type(self, message: str) -> str:
-        """Detect the type of visualization requested."""
-        message = message.lower().strip()
-        
-        if message.startswith('map') and 'latitude=' in message and 'longitude=' in message:
-            return 'map'
-        
-        if message.startswith('plot'):
-            if ('x=' in message and 'y=' in message) or \
-               any(x in message for x in ['vs', 'versus', 'against']):
-                return 'bubble'
-        
-        if message.startswith('heatmap'):
-            return 'heatmap'
-            
-        return None
-        
-    def process_request(self, message: str, df: pd.DataFrame) -> Tuple[dict, str]:
-        """Process visualization request."""
-        viz_type = self.detect_type(message)
-        if not viz_type:
-            return None, "Could not determine visualization type"
-            
-        viz_processor = self.viz_types[viz_type]
-        params, error = viz_processor.extract_params(message, df)
-        if error:
-            return None, error
-            
-        is_valid, error = viz_processor.validate_params(params, df)
-        if not is_valid:
-            return None, error
-            
-        return {
-            'type': viz_type,
-            'params': params,
-            'df': df.to_dict('records')  # Include dataframe in state
-        }, None
-
-def generate_colors(n):
-    """Generate n visually distinct colors.
-    
-    Args:
-        n: Number of colors needed
-        
-    Returns:
-        List of colors in RGB format suitable for plotly
-    """
-    colors = []
-    for i in range(n):
-        h = i / n  # Spread hues evenly
-        s = 0.7    # Moderate saturation
-        v = 0.9    # High value for visibility
-        
-        # Convert HSV to RGB
-        r, g, b = colorsys.hsv_to_rgb(h, s, v)
-        
-        # Convert to 0-255 range and then to plotly rgb string
-        colors.append(f'rgb({int(r*255)},{int(g*255)},{int(b*255)})')
-    
-    return colors
-
-def preprocess_heatmap_data(df: pd.DataFrame, params: dict) -> Tuple[pd.DataFrame, Optional[dict]]:
-    """Prepare data for heatmap visualization."""
-    # First filter the data if row_indices are provided
-    if 'row_indices' in params:
-        df = df.loc[params['row_indices']]
-    
-    # Rest of the function remains the same...
-    from scipy.cluster.hierarchy import linkage, optimal_leaf_ordering, leaves_list
-    from scipy.spatial.distance import pdist
-    
-    # Make a copy to avoid modifying original data
-    if params['columns'] is None:
-        numeric_cols = df.select_dtypes(include=[np.number]).columns
-        data = df[numeric_cols].copy()
-    else:
-        data = df[params['columns']].copy()
-    
-    # Handle missing values more robustly
-    # First check if we have any missing values
-    if data.isna().any().any():
-        # For each column, fill NaN with column median instead of mean
-        # (median is more robust to outliers)
-        for col in data.columns:
-            data[col] = data[col].fillna(data[col].median())
-            
-        # If any NaNs remain (e.g., if a column is all NaN),
-        # fill with 0 to ensure we can proceed
-        data = data.fillna(0)
-        
-        print(f"Warning: Missing values were present and filled with median values")
-    
-    # Apply standardization before clustering
-    if params['standardize'] == 'rows':
-        # Check for zero variance rows to avoid division by zero
-        row_std = data.std(axis=1)
-        zero_var_rows = row_std == 0
-        if zero_var_rows.any():
-            print(f"Warning: {zero_var_rows.sum()} rows had zero variance and were not standardized")
-            # Only standardize non-zero variance rows
-            data.loc[~zero_var_rows] = ((data.loc[~zero_var_rows].T - data.loc[~zero_var_rows].mean(axis=1)) / 
-                                      data.loc[~zero_var_rows].std(axis=1)).T
-    elif params['standardize'] == 'columns':
-        # Check for zero variance columns to avoid division by zero
-        col_std = data.std()
-        zero_var_cols = col_std == 0
-        if zero_var_cols.any():
-            print(f"Warning: {zero_var_cols.sum()} columns had zero variance and were not standardized")
-            # Only standardize non-zero variance columns
-            data.loc[:, ~zero_var_cols] = ((data.loc[:, ~zero_var_cols] - data.loc[:, ~zero_var_cols].mean()) / 
-                                         data.loc[:, ~zero_var_cols].std())
-    
-    clustering_info = {
-        'row_linkage': None,
-        'col_linkage': None,
-        'row_order': None,
-        'col_order': None,
-        'row_labels': data.index.tolist(),
-        'col_labels': data.columns.tolist()
-    }
-    
-    # Apply clustering if requested
-    if params['cluster']:
-        if params['cluster'] in ['rows', 'both']:
-            # Calculate distance matrix for rows
-            try:
-                row_dist = pdist(data, metric='euclidean')
-                # Perform hierarchical clustering
-                row_linkage = linkage(row_dist, method='ward')
-                # Apply optimal leaf ordering
-                row_linkage = optimal_leaf_ordering(row_linkage, row_dist)
-                row_order = leaves_list(row_linkage)
-                data = data.iloc[row_order]
-                clustering_info['row_linkage'] = row_linkage
-                clustering_info['row_order'] = row_order
-            except Exception as e:
-                print(f"Warning: Row clustering failed: {str(e)}")
-            
-        if params['cluster'] in ['columns', 'both']:
-            try:
-                # Calculate distance matrix for columns
-                col_dist = pdist(data.T, metric='euclidean')
-                # Perform hierarchical clustering
-                col_linkage = linkage(col_dist, method='ward')
-                # Apply optimal leaf ordering
-                col_linkage = optimal_leaf_ordering(col_linkage, col_dist)
-                col_order = leaves_list(col_linkage)
-                data = data.iloc[:, col_order]
-                clustering_info['col_linkage'] = col_linkage
-                clustering_info['col_order'] = col_order
-            except Exception as e:
-                print(f"Warning: Column clustering failed: {str(e)}")
-    
-    # Apply transpose if requested (after clustering)
-    if params['transpose']:
-        data = data.T
-        clustering_info['row_linkage'], clustering_info['col_linkage'] = (
-            clustering_info['col_linkage'], clustering_info['row_linkage'])
-        clustering_info['row_order'], clustering_info['col_order'] = (
-            clustering_info['col_order'], clustering_info['row_order'])
-        clustering_info['row_labels'], clustering_info['col_labels'] = (
-            clustering_info['col_labels'], clustering_info['row_labels'])
-    
-    return data, clustering_info
-
-def is_valid_color(color_str: str) -> bool:
-    """Check if a string is a valid color specification."""
-    # Common CSS color names
-    valid_colors =  {'aliceblue', 'antiquewhite', 'aqua', 'aquamarine', 'azure',
-    'beige', 'bisque', 'black', 'blanchedalmond', 'blue',
-    'blueviolet', 'brown', 'burlywood', 'cadetblue', 'chartreuse',
-    'chocolate', 'coral', 'cornflowerblue', 'cornsilk', 'crimson',
-    'cyan', 'darkblue', 'darkcyan', 'darkgoldenrod', 'darkgray',
-    'darkgreen', 'darkkhaki', 'darkmagenta', 'darkolivegreen', 'darkorange',
-    'darkorchid', 'darkred', 'darksalmon', 'darkseagreen', 'darkslateblue',
-    'darkslategray', 'darkturquoise', 'darkviolet', 'deeppink', 'deepskyblue',
-    'dimgray', 'dodgerblue', 'firebrick', 'floralwhite', 'forestgreen',
-    'fuchsia', 'gainsboro', 'ghostwhite', 'gold', 'goldenrod', 'gray',
-    'green', 'greenyellow', 'honeydew', 'hotpink', 'indianred', 'indigo',
-    'ivory', 'khaki', 'lavender', 'lavenderblush', 'lawngreen', 'lemonchiffon',
-    'lightblue', 'lightcoral', 'lightcyan', 'lightgoldenrodyellow', 'lightgreen',
-    'lightgrey', 'lightpink', 'lightsalmon', 'lightseagreen', 'lightskyblue',
-    'lightslategray', 'lightsteelblue', 'lightyellow', 'lime', 'limegreen',
-    'linen', 'magenta', 'maroon', 'mediumaquamarine', 'mediumblue', 'mediumorchid',
-    'mediumpurple', 'mediumseagreen', 'mediumslateblue', 'mediumspringgreen',
-    'mediumturquoise', 'mediumvioletred', 'midnightblue', 'mintcream', 'mistyrose',
-    'moccasin', 'navajowhite', 'navy', 'oldlace', 'olive', 'olivedrab', 'orange',
-    'orangered', 'orchid', 'palegoldenrod', 'palegreen', 'paleturquoise',
-    'palevioletred', 'papayawhip', 'peachpuff', 'peru', 'pink', 'plum', 'powderblue',
-    'purple', 'rebeccapurple', 'red', 'rosybrown', 'royalblue', 'saddlebrown',
-    'salmon', 'sandybrown', 'seagreen', 'seashell', 'sienna', 'silver', 'skyblue',
-    'slateblue', 'slategray', 'snow', 'springgreen', 'steelblue', 'tan', 'teal',
-    'thistle', 'tomato', 'turquoise', 'violet', 'wheat', 'white', 'whitesmoke',
-    'yellow', 'yellowgreen'}
-    
-    return (
-        color_str.lower() in valid_colors or  # Named colors
-        bool(re.match(r'^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$', color_str)) or  # Hex colors
-        bool(re.match(r'^rgb\s*\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)$', color_str))  # RGB colors
-    )
 
 # Move all callbacks before main
 @callback(
@@ -4054,54 +3049,80 @@ def update_visualization(viz_state):
         # Convert the dictionary records back to DataFrame
         df = pd.DataFrame(viz_state['df'])
         
-        # Get the visualization processor
-        viz_handler = VisualizationHandler()
+        # Import visualization service
+        from services import registry
+        viz_service = registry.get_service('visualization')
+        
+        # Get the visualization type
         viz_type = viz_state['type']
+        if not viz_type or viz_type not in viz_service.viz_types:
+            return html.Div(f"Invalid visualization type: {viz_type}"), "Error: Invalid visualization type"
+            
+        # Create the visualization using the service's visualization type
+        fig = viz_service.viz_types[viz_type].create_figure(viz_state.get('params', {}), df)
         
-        if viz_type not in viz_handler.viz_types:
-            return html.Div(f"Unknown visualization type: {viz_type}"), "Error: Invalid type"
+        # Apply any stored view settings
+        if viz_state.get('view_settings'):
+            fig = viz_service.viz_types[viz_type].apply_view_settings(fig, viz_state['view_settings'])
         
-        viz_processor = viz_handler.viz_types[viz_type]
-        
-        # Create the visualization
-        figure = viz_processor.create_figure(viz_state['params'], df)
-        
-        return html.Div([
-            dcc.Graph(
-                figure=figure,
-                style={'height': '700px'},
-                config={
-                    'scrollZoom': True,  # Enable scroll zoom
-                    'modeBarButtonsToAdd': [
-                        'drawclosedpath',  # Area selection
-                        'eraseshape',      # Remove selections
-                        'select2d',        # Box selection
-                        'lasso2d',         # Lasso selection
-                        'zoomIn2d',        # Zoom in button
-                        'zoomOut2d',       # Zoom out button
-                        'autoScale2d'      # Auto-scale
-                    ],
-                    'displaylogo': False,  # Remove plotly logo
-                    'responsive': True,    # Make plot responsive
-                    'showAxisDragHandles': True,  # Show axis drag handles
-                    'showAxisRangeEntryBoxes': True,  # Show range entry boxes
-                    'toImageButtonOptions': {
-                        'format': 'png',  # Export format
-                        'filename': 'plot',
-                        'height': 700,
-                        'width': 1200,
-                        'scale': 2  # Increase export resolution
-                    },
-                    'doubleClick': 'reset+autosize',  # Double click to reset view
-                    'displayModeBar': True,  # Always show mode bar
-                    'modeBarButtonsToRemove': []  # Keep all default buttons
-                }
-            )
-        ]), f"Created {viz_type} visualization"
-        
+        # Return the figure with state preservation config
+        return dcc.Graph(
+            id='viz-graph',
+            figure=fig,
+            config={
+                'scrollZoom': True,  # Enable scroll zoom
+                'modeBarButtonsToAdd': [
+                    'drawline', 'drawopenpath',  # Line and path drawing
+                    'drawclosedpath',  # Area selection
+                    'eraseshape',      # Remove selections
+                    'select2d',        # Box selection
+                    'lasso2d',         # Lasso selection
+                    'zoomIn2d',        # Zoom in button
+                    'zoomOut2d',       # Zoom out button
+                    'autoScale2d'      # Auto-scale
+                ],
+                'displaylogo': False,  # Remove plotly logo
+                'responsive': True,    # Make plot responsive
+                'showAxisDragHandles': True,  # Show axis drag handles
+                'showAxisRangeEntryBoxes': True,  # Show range entry boxes
+                'toImageButtonOptions': {
+                    'format': 'png',  # Export format
+                    'filename': 'plot',
+                    'scale': 2  # Increase export resolution
+                },
+                'doubleClick': 'reset+autosize',  # Double click to reset view
+                'displayModeBar': True,  # Always show mode bar
+                'modeBarButtonsToRemove': []  # Keep all default buttons
+            },
+            style={'height': '700px'}
+        ), "Visualization updated successfully"
+            
     except Exception as e:
-        print(f"Visualization error: {str(e)}")  # Add console logging
-        return html.Div(f"Error creating visualization: {str(e)}"), str(e)
+        print(f"Error updating visualization: {str(e)}")
+        return html.Div(f"Error creating visualization: {str(e)}"), f"Error: {str(e)}"
+
+# Add callback to handle figure state updates
+@callback(
+    Output('viz-state-store', 'data', allow_duplicate=True),
+    Input('viz-graph', 'relayoutData'),
+    State('viz-state-store', 'data'),
+    prevent_initial_call=True
+)
+def update_figure_state(relayout_data, viz_state):
+    """Store figure view state when user interacts with the plot."""
+    if not relayout_data or not viz_state:
+        raise PreventUpdate
+        
+    # Update the view settings in the state
+    if not viz_state.get('view_settings'):
+        viz_state['view_settings'] = {}
+    
+    # Store relevant view settings (zoom, center, etc.)
+    for key in relayout_data:
+        if any(k in key for k in ['zoom', 'center', 'range', 'domain']):
+            viz_state['view_settings'][key] = relayout_data[key]
+    
+    return viz_state
 
 # Add new callback for refresh functionality
 @callback(
@@ -4195,11 +3216,12 @@ def connect_database(n_clicks, db_path, current_state):
         if not structure:
             raise Exception("Could not read database structure")
             
-        # Initialize text search
+        # Initialize or update text search
         print(f"Indexing database: {db_path}")
         global text_searcher_db
-        text_searcher_db = DatabaseTextSearch()
-        text_searcher_db.index_database(db_path)
+        if text_searcher_db is None:
+            text_searcher_db = DatabaseTextSearch()
+        text_searcher_db.update_database(db_path)
         print(f"Finished indexing database: {db_path}")
         
         # Store structure in global variable for access
@@ -4530,457 +3552,6 @@ def update_weaviate_views(weaviate_state, active_tab):
         print(f"Error: {str(e)}")
         return error_msg, html.Div(error_msg, style={'color': 'red'}), base_style
 
-def transform_weaviate_results(json_results: dict) -> pd.DataFrame:
-    """Transform Weaviate JSON results into a unified DataFrame with consistent structure.
-    
-    Args:
-        json_results: Dict containing:
-            - query_info: Query parameters and metadata
-            - raw_results: Direct hits from collections
-            - unified_results: Unified Article records with cross-references
-            
-    Returns:
-        pd.DataFrame with columns:
-            - score: Search relevance score
-            - id: Record identifier (uuid from raw_results, id from unified_results)
-            - collection: Source collection name
-            - source: Original collection for raw_results, source field for unified
-            - {collection}_{property}: Dynamic property columns
-            - cross_references: JSON string of cross-references (or None)
-            
-        DataFrame.attrs contains:
-            - query_info: Original query parameters
-            - summary: Collection counts and statistics
-    """
-    try:
-        print("\n=== Processing Weaviate Results ===")
-        
-        # Initialize empty records list and property tracking
-        records = []
-        all_properties = {}  # {collection: {property_name: data_type}}
-        
-        # Process raw_results first to discover all possible properties
-        raw_results = json_results.get('raw_results', {})
-        print(f"\nProcessing raw results from {len(raw_results)} collections")
-        
-        for collection_name, collection_results in raw_results.items():
-            if collection_name == 'Article':
-                continue  # Skip Articles in raw_results as they'll be handled in unified
-                
-            print(f"\nProcessing collection: {collection_name}")
-            print(f"Found {len(collection_results)} records")
-            
-            # Track properties for this collection
-            all_properties[collection_name] = set()
-            
-            for record in collection_results:
-                # Create base record
-                transformed = {
-                    'score': record.get('score', 0.0),
-                    'id': str(record.get('uuid', '')),
-                    'collection': collection_name,
-                    'source': collection_name,
-                    'cross_references': None  # Raw results don't have cross-references
-                }
-                
-                # Process properties
-                properties = record.get('properties', {})
-                for prop_name, value in properties.items():
-                    column_name = f"{collection_name}_{prop_name}"
-                    transformed[column_name] = value
-                    all_properties[collection_name].add(prop_name)
-                
-                records.append(transformed)
-        
-        # Process unified results (Articles)
-        unified_results = json_results.get('unified_results', [])
-        print(f"\nProcessing {len(unified_results)} unified Article results")
-        
-        if unified_results:
-            all_properties['Article'] = set()
-            
-            for record in unified_results:
-                # Create base record
-                transformed = {
-                    'score': record.get('score', 0.0),
-                    'id': str(record.get('id', '')),
-                    'collection': 'Article',
-                    'source': record.get('source', 'Unknown')
-                }
-                
-                # Process Article properties
-                properties = record.get('properties', {})
-                for prop_name, value in properties.items():
-                    column_name = f"Article_{prop_name}"
-                    transformed[column_name] = value
-                    all_properties['Article'].add(prop_name)
-                
-                # Handle cross-references
-                traced = record.get('traced_elements', {})
-                if traced:
-                    # Convert to simplified format for storage
-                    refs = {}
-                    for ref_collection, elements in traced.items():
-                        if elements:  # Only store non-empty references
-                            refs[ref_collection] = [
-                                {
-                                    'id': str(elem.get('id', '')),
-                                    'score': elem.get('score', 0.0)
-                                } for elem in elements
-                            ]
-                    transformed['cross_references'] = (
-                        json.dumps(refs) if refs else None
-                    )
-                else:
-                    transformed['cross_references'] = None
-                
-                records.append(transformed)
-        
-        # Create DataFrame
-        if not records:
-            print("No results found")
-            empty_df = pd.DataFrame(columns=[
-                'score', 'id', 'collection', 'source', 'cross_references'
-            ])
-            empty_df.attrs['query_info'] = json_results.get('query_info', {})
-            empty_df.attrs['summary'] = {'total_results': 0}
-            return empty_df
-        
-        # Create DataFrame and ensure all columns exist
-        df = pd.DataFrame(records)
-        
-        # Create summary information
-        summary = {
-            'total_results': len(df),
-            'collection_counts': df['collection'].value_counts().to_dict(),
-            'score_range': {
-                'min': df['score'].min(),
-                'max': df['score'].max(),
-                'mean': df['score'].mean()
-            },
-            'property_coverage': {
-                collection: list(props) 
-                for collection, props in all_properties.items()
-            }
-        }
-        
-        # Store metadata
-        df.attrs['query_info'] = json_results.get('query_info', {})
-        df.attrs['summary'] = summary
-        
-        # Sort by score descending
-        df = df.sort_values('score', ascending=False)
-        
-        print("\n=== Results Summary ===")
-        print(f"Total records: {len(df)}")
-        print("\nBy collection:")
-        for collection, count in summary['collection_counts'].items():
-            print(f"- {collection}: {count} records")
-        print(f"\nScore range: {summary['score_range']['min']:.3f} - {summary['score_range']['max']:.3f}")
-        
-        return df
-        
-    except Exception as e:
-        print(f"Error transforming Weaviate results: {str(e)}")
-        print(f"Error traceback: {traceback.format_exc()}")
-        # Return empty DataFrame with error information
-        empty_df = pd.DataFrame(columns=[
-            'score', 'id', 'collection', 'source', 'cross_references'
-        ])
-        empty_df.attrs['query_info'] = json_results.get('query_info', {})
-        empty_df.attrs['summary'] = {'error': str(e)}
-        return empty_df
-    
-def format_weaviate_results_preview(df: pd.DataFrame, max_rows: int = 5) -> str:
-    """Generate a formatted preview of Weaviate search results for chat display.
-    
-    Args:
-        df: DataFrame from transform_weaviate_results
-        max_rows: Maximum number of rows to show per collection
-    """
-    try:
-        # Get metadata from DataFrame attributes
-        query_info = df.attrs.get('query_info', {})
-        summary = df.attrs.get('summary', {})
-        
-        # Start building output
-        sections = []
-        
-        # 1. Query Information
-        sections.append("### Search Query Information")
-        sections.append(f"- Query: {query_info.get('text', 'Not specified')}")
-        sections.append(f"- Type: {query_info.get('type', 'Not specified')}")
-        sections.append(f"- Minimum Score: {query_info.get('min_score', 'Not specified')}")
-        sections.append("")
-        
-        # 2. Result Summary
-        sections.append("### Results Summary")
-        sections.append(f"Total Results: {summary.get('total_results', len(df))}")
-        if 'collection_counts' in summary:
-            sections.append("\nResults by Collection:")
-            for collection, count in summary['collection_counts'].items():
-                sections.append(f"- {collection}: {count}")
-        sections.append("")
-        
-        # 3. Collection-specific previews
-        sections.append("### Result Previews")
-        
-        for collection in df['collection'].unique():
-            collection_df = df[df['collection'] == collection].head(max_rows)
-            if len(collection_df) == 0:
-                continue
-                
-            sections.append(f"\n#### {collection} Preview")
-            
-            # Build preview table based on collection type
-            if collection == 'Article':
-                sections.append("\n| Score | ID | Filename | Abstract Preview |")
-                sections.append("|-------|-----|----------|-----------------|")
-                for _, row in collection_df.iterrows():
-                    # Get filename and abstract
-                    filename = row.get('Article_filename', 'N/A')
-                    abstract = row.get('Article_abstract', '')
-                    # Create abstract preview
-                    abstract_preview = abstract[:50] + "..." if abstract and len(abstract) > 50 else abstract or 'N/A'
-                    # Format row with proper spacing
-                    sections.append(
-                        f"| {row['score']:.3f} | {row['id'][:8]}... | "
-                        f"{filename} | {abstract_preview} |"
-                    )
-                sections.append("")  # Add spacing after table
-                
-            elif collection == 'Reference':
-                sections.append("\n| Score | ID | Title |")
-                sections.append("|-------|-----|-------|")
-                for _, row in collection_df.iterrows():
-                    title = row.get('Reference_title', 'N/A')
-                    # Truncate long titles
-                    title_preview = title[:50] + "..." if len(title) > 50 else title
-                    sections.append(
-                        f"| {row['score']:.3f} | {row['id'][:8]}... | {title_preview} |"
-                    )
-                sections.append("")  # Add spacing after table
-                
-            elif collection == 'NamedEntity':
-                sections.append("\n| Score | ID | Name | Type |")
-                sections.append("|-------|-----|------|------|")
-                for _, row in collection_df.iterrows():
-                    name = row.get('NamedEntity_name', 'N/A')
-                    entity_type = row.get('NamedEntity_type', 'N/A')
-                    sections.append(
-                        f"| {row['score']:.3f} | {row['id'][:8]}... | {name} | {entity_type} |"
-                    )
-                sections.append("")  # Add spacing after table
-            
-            # Add note if there are more results
-            total_count = len(df[df['collection'] == collection])
-            if total_count > max_rows:
-                sections.append(f"... and {total_count - max_rows} more {collection} results\n")
-        
-        # Add score distribution analysis
-        sections.append("### Score Distribution")
-        thresholds = [0.3, 0.5, 0.7, 0.9]
-        sections.append("\n| Minimum Score | Results | By Collection |")
-        sections.append("|---------------|----------|---------------|")
-        
-        for threshold in thresholds:
-            filtered_df = df[df['score'] >= threshold]
-            if len(filtered_df) > 0:
-                collection_counts = filtered_df['collection'].value_counts()
-                counts_str = ", ".join(
-                    f"{col}: {count}" 
-                    for col, count in collection_counts.items()
-                )
-                sections.append(
-                    f"| {threshold:.1f} | {len(filtered_df)} | {counts_str} |"
-                )
-        
-        return "\n".join(sections)
-        
-    except Exception as e:
-        return f"Error formatting results preview: {str(e)}"
-
-def format_results_preview(df: pd.DataFrame, max_rows: int = 5) -> str:
-    """Format a preview of the search results.
-    
-    Args:
-        df: DataFrame with transformed Weaviate results
-        max_rows: Maximum number of rows to show
-        
-    Returns:
-        Markdown formatted string with results preview
-    """
-    if df.empty:
-        return "No results found."
-    
-    # Create display DataFrame with property and reference counts in desired order
-    display_df = pd.DataFrame({
-        'Score': df['score'].round(3),
-        'Collection': df['collection'],
-        'ID': df['object_id'],
-        'Properties': df['properties'].apply(len),
-        'References': df['cross_references'].apply(len)
-    })
-    
-    # Format as markdown table
-    preview = ["### Search Results", ""]
-    preview.append("| Score | Collection | ID | Properties | References |")
-    preview.append("|--------|------------|-----|------------|------------|")
-    
-    # Add rows
-    for _, row in display_df.head(max_rows).iterrows():
-        preview.append(
-            f"| {row['Score']} | {row['Collection']} | {row['ID']} | {row['Properties']} | {row['References']} |"
-        )
-    
-    if len(df) > max_rows:
-        preview.append(f"\n... and {len(df) - max_rows} more results.")
-    
-    return "\n".join(preview)
-
-def generate_score_distribution(df: pd.DataFrame) -> str:
-    """Generate a markdown summary of result score distribution.
-    
-    Args:
-        df: DataFrame with transformed Weaviate results
-        
-    Returns:
-        Markdown formatted string showing score distribution
-    """
-    if df.empty:
-        return "No results found."
-        
-    # Get summary information
-    summary = df.attrs.get('summary', {})
-    total_matches = summary.get('total_matches', len(df))
-    collection_counts = summary.get('collection_counts', df['collection'].value_counts().to_dict())
-    
-    # Calculate counts at different thresholds
-    thresholds = [0.1, 0.3, 0.5, 0.7, 0.9]
-    threshold_results = []
-    
-    for threshold in thresholds:
-        filtered_df = df[df['score'] >= threshold]
-        if len(filtered_df) > 0:
-            # Get counts by collection for this threshold
-            counts = filtered_df['collection'].value_counts()
-            details = ", ".join([f"{col}: {count}" for col, count in counts.items()])
-            threshold_results.append({
-                'threshold': threshold,
-                'total': len(filtered_df),
-                'details': details
-            })
-    
-    # Build markdown output
-    output = []
-    
-    # Add summary section
-    output.append("### Search Results Summary")
-    output.append(f"\nTotal Matches: {total_matches}")
-    output.append("\nResults by Collection:")
-    for collection, count in collection_counts.items():
-        output.append(f"- {collection}: {count}")
-    
-    # Add threshold table
-    output.append("\n### Score Distribution")
-    output.append("\n| Minimum Score | Total Results | Details |")
-    output.append("|--------------|---------------|----------|")
-    for result in threshold_results:
-        output.append(f"| {result['threshold']:.1f} | {result['total']} | {result['details']} |")
-    
-    # Add instructions
-    output.append("\nTo view results, specify a minimum relevance score using: Use threshold X.X")
-    output.append("\nFor example:")
-    output.append("- Use threshold 0.3 for broader coverage")
-    output.append("- Use threshold 0.7 for high-relevance results only")
-    output.append("\nNote: This command specifically sets the literature search threshold.")
-    
-    return "\n".join(output)
-
-def is_literature_query(message: str) -> Tuple[bool, Optional[str]]:
-    """Detect if a message is requesting literature information.
-    
-    Returns:
-        Tuple[bool, Optional[str]]: (is_literature_query, extracted_query)
-    """
-    patterns = [
-        # Basic knowledge patterns
-        r'(?:what is|what\'s) known about\s+(.+?)(?:\?|$)',
-        
-        # Direct literature search patterns
-        r'(?:find|search for|look for|get)(?:\s+\w+)?\s+(?:papers?|articles?|literature|research)(?:\s+\w+)?\s+(?:about|on|related to|regarding|concerning)\s+(.+?)(?:\?|$)',
-        
-        # Research inquiry patterns
-        r'tell me about the research (?:on|in|about)\s+(.+?)(?:\?|$)',
-        r'what research exists (?:on|about)\s+(.+?)(?:\?|$)',
-        r'what (?:papers|articles) discuss\s+(.+?)(?:\?|$)',
-        
-        # Biological entity patterns
-        r'tell me about\s+([A-Z][a-z]+\s+[a-z]+)(?:\?|$)',
-        r'(?:find|search for|tell me about)\s+(.+?(?:gene|protein|pathway|transposon|plasmid|enzyme|regulator))(?:\?|$)',
-        r'what (?:is|are)\s+([A-Z][a-z]+\s+[a-z]+)(?:\?|$)',
-        
-        # Literature request patterns
-        r'(?:show|give|get)(?:\s+\w+)?\s+(?:papers?|articles?|literature|research)\s+(?:about|on|for)\s+(.+?)(?:\?|$)',
-        r'(?:papers?|articles?|literature|research)\s+(?:about|on|related to)\s+(.+?)(?:\?|$)',
-        
-        # Enzyme-specific patterns
-        r'(?:find|tell me about|search for)\s+(.+?ase[s]?)(?:\?|$)',  # Match enzyme names ending in 'ase'
-        r'(?:find|tell me about|search for)\s+(.+?(?:reductase|oxidase|synthase|kinase|phosphatase))(?:\?|$)'  # Common enzyme types
-    ]
-    
-    print("\n=== Literature Query Detection Debug ===")
-    print(f"Input message: '{message}'")
-    normalized = message.lower().strip()
-    print(f"Normalized message: '{normalized}'")
-    print("\nTrying patterns:")
-    
-    for pattern in patterns:
-        print(f"\nTrying pattern: {pattern}")
-        match = re.search(pattern, normalized)
-        if match:
-            query = match.group(1).strip()
-            print(f"Match found! Extracted query: '{query}'")
-            return True, query
-    
-    print("No literature query patterns matched")
-    return False, None
-
-def extract_threshold_from_message(message: str) -> Optional[float]:
-    """Extract threshold value from user message.
-    
-    Args:
-        message: User's chat message
-        
-    Returns:
-        Float threshold value or None if not found/invalid
-        
-    Examples:
-        >>> extract_threshold_from_message("Use threshold 0.3")
-        0.3
-        >>> extract_threshold_from_message("Set cutoff to 0.7")
-        0.7
-    """
-    patterns = [
-        r"(?:use|set|apply|with)\s+(?:a\s+)?(?:threshold|cutoff|score|limit)\s+(?:of\s+)?(\d+\.?\d*)",
-        r"threshold\s+(?:of\s+)?(\d+\.?\d*)",
-        r"cutoff\s+(?:of\s+)?(\d+\.?\d*)"
-    ]
-    
-    message = message.lower().strip()
-    
-    for pattern in patterns:
-        match = re.search(pattern, message)
-        if match:
-            try:
-                threshold = float(match.group(1))
-                if 0 <= threshold <= 1:
-                    return threshold
-            except ValueError:
-                continue
-    
-    return None
-
 ####################################
 #
 # Weaviate Management Functions
@@ -5077,19 +3648,6 @@ def generate_query_id(is_original: bool = True, alt_number: Optional[int] = None
         
     return f"query_{timestamp}{suffix}"
 
-def generate_literature_query_id(query: str, threshold: float) -> str:
-    """Generate a unique ID for literature queries.
-    
-    Args:
-        query: The literature search query
-        threshold: The relevance threshold used
-        
-    Returns:
-        str: Query ID in format lit_query_YYYYMMDD_HHMMSS
-    """
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    return f"lit_query_{timestamp}"
-
 def add_query_ids_to_response(response: str) -> str:
     """Add unique Query IDs to SQL blocks in the response."""
     print("\n=== SQL Block Processing Debug ===")
@@ -5143,270 +3701,6 @@ def add_query_ids_to_response(response: str) -> str:
     except Exception as e:
         print(f"Error processing SQL blocks: {str(e)}")
         return response
-
-def search_all_sources(query: str, threshold: float = 0.6, successful_queries: dict = None) -> dict:
-    """Search across all available data sources for relevant information."""
-    # Initialize or use provided store
-    successful_queries = successful_queries or {}
-    
-    results = {
-        'dataset_matches': [],
-        'database_matches': [],
-        'literature_matches': [],
-        'metadata': {
-            'sources_searched': [],
-            'total_matches': 0,
-            'coverage': {},
-            'query': query,
-            'threshold': threshold,
-            'search_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        }
-    }
-    
-    total_matches = 0
-    
-    # Check for literature query first
-    is_lit, lit_query = is_literature_query(query)
-    if is_lit:
-        try:
-            print("\n=== Executing Literature Search ===")
-            print(f"Literature query: {lit_query}")
-            weaviate_results = execute_weaviate_query(lit_query)
-            if weaviate_results and weaviate_results.get('unified_results'):
-                df = transform_weaviate_results(weaviate_results)
-                query_id = generate_literature_query_id(lit_query, threshold)
-                
-                # Store the DataFrame as records in the store
-                successful_queries[query_id] = {
-                    'query': lit_query,
-                    'threshold': threshold,
-                    'dataframe': df.to_dict('records'),  # Convert to serializable format
-                    'metadata': {
-                        'execution_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        'total_results': len(df),
-                        'query_info': df.attrs.get('query_info', {}),
-                        'summary': df.attrs.get('summary', {})
-                    }
-                }
-                
-                results['literature_matches'] = {
-                    'results': weaviate_results,
-                    'preview': format_literature_preview(df, query_id, threshold),
-                    'query_id': query_id
-                }
-                lit_match_count = len(weaviate_results.get('unified_results', []))
-                total_matches += lit_match_count
-                results['metadata']['sources_searched'].append('literature')
-                results['metadata']['coverage']['literature'] = {
-                    'total_matches': lit_match_count,
-                    'total_articles': len(df) if df is not None else 0
-                }
-        except Exception as e:
-            print(f"Literature search error: {str(e)}")
-            results['metadata']['errors'] = results['metadata'].get('errors', [])
-            results['metadata']['errors'].append(f"Literature search error: {str(e)}")
-
-    # ... rest of existing code for dataset and database searches ...
-
-    # Update total matches
-    results['metadata']['total_matches'] = total_matches
-    
-    return results, successful_queries  # Return both results and updated store
-
-def format_search_results(results: dict) -> str:
-    """Format search results into a readable markdown summary."""
-    # Early return if no sources were searched
-    if not results['metadata']['sources_searched']:
-        return "No data sources were available to search."
-
-    # Calculate match counts
-    dataset_matches = len(results.get('dataset_matches', []))
-    database_matches = len(results.get('database_matches', []))
-    literature_matches = 0
-    if results.get('literature_matches'):
-        literature_matches = results['literature_matches'].get('results', {}).get('unified_results', [])
-        literature_matches = len(literature_matches)
-    total_matches = dataset_matches + database_matches + literature_matches
-
-    # Early return if no matches found
-    if total_matches == 0:
-        return "No matches found in available data sources."
-
-    sections = []
-    
-    # Add header with search coverage info
-    sections.append("### Search Results Summary")
-    sources = results['metadata']['sources_searched']
-    
-    sections.append(f"Found {total_matches} total matches across available sources:")
-    if 'literature' in sources and literature_matches > 0:
-        sections.append(f"- Literature: {literature_matches} matches")
-    if 'datasets' in sources and dataset_matches > 0:
-        sections.append(f"- Datasets: {dataset_matches} matches")
-    if 'database' in sources and database_matches > 0:
-        sections.append(f"- Database: {database_matches} matches")
-    sections.append("")
-    
-    # Format literature matches first if present
-    if results.get('literature_matches'):
-        sections.append("#### Literature Matches")
-        sections.append(results['literature_matches']['preview'])
-    
-    # Format dataset matches
-    if results['dataset_matches']:
-        sections.append("#### Dataset Matches")
-        for match in results['dataset_matches']:
-            sections.append(f"\nDataset: **{match['source_name']}** (Score: {match['similarity']:.2f})")
-            for col_name, details in match['details'].items():
-                total_matches = len(details['matches'])
-                sections.append(f"\nColumn `{col_name}`: {total_matches} matching values")
-                
-                # Show all matches with counts, sorted by similarity
-                all_matches = sorted(
-                    details['matches'],
-                    key=lambda x: details['similarities'][x],
-                    reverse=True
-                )
-                for value in all_matches:
-                    count = details['counts'][value]
-                    similarity = details['similarities'][value]
-                    sections.append(f"- '{value}' ({count} occurrences, {similarity:.0f}% match)")
-    
-    # Format database matches
-    if results['database_matches']:
-        sections.append("\n#### Database Matches")
-        for match in results['database_matches']:
-            sections.append(f"\nTable: **{match['source_name']}** (Score: {match['similarity']:.2f})")
-            for col_name, details in match['details'].items():
-                total_matches = len(details['matches'])
-                sections.append(f"\nColumn `{col_name}`: {total_matches} matching values")
-                
-                # Show all matches with counts, sorted by similarity
-                all_matches = sorted(
-                    details['matches'],
-                    key=lambda x: details['similarities'][x],
-                    reverse=True
-                )
-                for value in all_matches:
-                    count = details['counts'][value]
-                    similarity = details['similarities'][value]
-                    sections.append(f"- '{value}' ({count} occurrences, {similarity:.0f}% match)")
-    
-    # Add error information if any
-    if 'errors' in results['metadata']:
-        sections.append("\n#### Search Errors")
-        for error in results['metadata']['errors']:
-            sections.append(f"- {error}")
-    
-    return "\n".join(sections)
-
-def is_search_query(message: str) -> bool:
-    """Detect if a message is a search query using various patterns."""
-    # First check if it's a dataset/database info request
-    if re.search(r'tell\s+me\s+about\s+(?:my\s+)?(?:database|datasets?)\b', message.lower()):
-        return False
-        
-    search_patterns = [
-        # Direct search commands
-        r'^(?:find|search|look)\s+(?:for|up)?\s*(.+)$',
-        # Question-based searches
-        r'(?:where|which|what|how\s+many|who|when)\s+(?:are|is|was|were|have|has|had)?\s*(.+)$',
-        # Show/list/get patterns
-        r'(?:show|list|get|give)\s+(?:me)?\s+(?:all|any)?\s*(.+)$',
-        # About/containing patterns
-        r'(?:about|containing|related\s+to|with)\s*(.+)$',
-        # Tell me patterns that imply search
-        r'tell\s+me\s+(?:about|of|all)?\s+(.+)$'
-    ]
-    
-    print("\n=== Search Pattern Detection Debug ===")
-    print(f"Input message: '{message}'")
-    normalized = message.lower().strip()
-    print(f"Normalized message: '{normalized}'")
-    print("\nTrying search patterns:")
-    
-    for pattern in search_patterns:
-        print(f"\nPattern: {pattern}")
-        if re.search(pattern, normalized):
-            print("✓ Pattern matched!")
-            return True
-        print("✗ No match")
-    
-    return False
-
-def format_literature_preview(df: pd.DataFrame, query_id: str, threshold: float) -> str:
-    """Format literature results preview with query ID and conversion instructions.
-    
-    Args:
-        df: DataFrame from transform_weaviate_results
-        query_id: Unique identifier for this literature query
-        threshold: Current relevance threshold
-        
-    Returns:
-        str: Formatted preview with ID and instructions
-    """
-    # Get the standard preview
-    preview = format_weaviate_results_preview(df)
-    
-    # Add DataFrame preview with ID
-    preview_rows = min(5, len(df))  # Show up to 5 rows
-    df_preview = df.head(preview_rows)
-    
-    # Select most relevant columns for preview
-    preview_columns = ['score', 'collection']
-    if 'Article_title' in df.columns:
-        preview_columns.append('Article_title')
-    elif 'Article_filename' in df.columns:
-        preview_columns.append('Article_filename')
-    if 'Article_abstract' in df.columns:
-        preview_columns.append('Article_abstract')
-    
-    df_section = f"""
-
-Results preview:
-
-Query ID: {query_id}
-```
-{df_preview[preview_columns].to_string()}
-```
-
-Current threshold: {threshold}
-
-Available actions:
-1. Refine results with different threshold:
-   refine {query_id} with threshold 0.X
-   
-2. Save results as dataset:
-   convert {query_id} to dataset"""
-    
-    return preview + df_section
-
-def extract_query_id_from_message(message: str) -> Optional[str]:
-    """Extract literature query ID from refinement command.
-    
-    Args:
-        message: User's chat message
-        
-    Returns:
-        str: Query ID if found, None otherwise
-        
-    Examples:
-        >>> extract_query_id_from_message("refine lit_query_20250207_123456 with threshold 0.7")
-        'lit_query_20250207_123456'
-    """
-    patterns = [
-        r"(?:refine|update|modify)\s+(lit_query_\d{8}_\d{6})",
-        r"(lit_query_\d{8}_\d{6})\s+(?:with|using|at)\s+threshold"
-    ]
-    
-    message = message.lower().strip()
-    
-    for pattern in patterns:
-        match = re.search(pattern, message)
-        if match:
-            return match.group(1)
-    
-    return None
 
 if __name__ == '__main__':
     # Start the app

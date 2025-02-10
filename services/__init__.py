@@ -4,6 +4,8 @@ Services package for ChatDash application.
 This package provides modular services for handling different types of chat interactions.
 """
 
+from typing import Dict, Any
+
 from .base import (
     PreviewIdentifier,
     ServiceContext,
@@ -14,13 +16,40 @@ from .base import (
 )
 from .test_service import StoreReportService
 from .literature_service import LiteratureService
+from .index_search_service import IndexSearchService
+from .visualization_service import VisualizationService
 
 # Create global service registry
 registry = ServiceRegistry()
 
-# Register services
-registry.register(StoreReportService())
-registry.register(LiteratureService())
+# Initialize basic services
+store_report_service = StoreReportService()
+literature_service = LiteratureService()
+visualization_service = VisualizationService()
+
+# Register basic services
+registry.register(store_report_service)
+registry.register(literature_service)
+registry.register(visualization_service)
+
+def initialize_index_search(text_searcher: Any, text_searcher_db: Any) -> None:
+    """Initialize the index search service with available searchers.
+    
+    This function should be called from ChatDash.py after searchers are initialized.
+    
+    Args:
+        text_searcher: Dataset text searcher instance
+        text_searcher_db: Database text searcher instance
+    """
+    index_sources = {
+        'datasets': text_searcher,
+        'database': text_searcher_db,
+        # Future sources can be added here:
+        # 'documents': document_searcher,
+        # 'code': code_searcher,
+    }
+    index_search_service = IndexSearchService(index_sources=index_sources)
+    registry.register(index_search_service)
 
 __all__ = [
     'PreviewIdentifier',
@@ -29,5 +58,6 @@ __all__ = [
     'ServiceResponse',
     'ChatService',
     'ServiceRegistry',
-    'registry'
+    'registry',
+    'initialize_index_search'  # Add initialization function to exports
 ] 
