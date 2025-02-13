@@ -489,29 +489,11 @@ Current threshold: {threshold}
             Tuple[bool, Optional[str]]: (is_literature_query, extracted_query)
         """
         patterns = [
-            # Basic knowledge patterns
-            r'(?:what is|what\'s) known about\s+(.+?)(?:\?|$)',
+            # [find] [me] <papers|literature|references> about <X>
+            r'(?:find\s+)?(?:me\s+)?(?:papers|literature|references)\s+about\s+(.+?)(?:\?|$)',
             
-            # Direct literature search patterns
-            r'(?:find|search for|look for|get)(?:\s+\w+)?\s+(?:papers?|articles?|literature|research)(?:\s+\w+)?\s+(?:about|on|related to|regarding|concerning)\s+(.+?)(?:\?|$)',
-            
-            # Research inquiry patterns
-            r'tell me about the research (?:on|in|about)\s+(.+?)(?:\?|$)',
-            r'what research exists (?:on|about)\s+(.+?)(?:\?|$)',
-            r'what (?:papers|articles) discuss\s+(.+?)(?:\?|$)',
-            
-            # Biological entity patterns
-            r'tell me about\s+([A-Z][a-z]+\s+[a-z]+)(?:\?|$)',
-            r'(?:find|search for|tell me about)\s+(.+?(?:gene|protein|pathway|transposon|plasmid|enzyme|regulator))(?:\?|$)',
-            r'what (?:is|are)\s+([A-Z][a-z]+\s+[a-z]+)(?:\?|$)',
-            
-            # Literature request patterns
-            r'(?:show|give|get)(?:\s+\w+)?\s+(?:papers?|articles?|literature|research)\s+(?:about|on|for)\s+(.+?)(?:\?|$)',
-            r'(?:papers?|articles?|literature|research)\s+(?:about|on|related to)\s+(.+?)(?:\?|$)',
-            
-            # Enzyme-specific patterns
-            r'(?:find|tell me about|search for)\s+(.+?ase[s]?)(?:\?|$)',  # Match enzyme names ending in 'ase'
-            r'(?:find|tell me about|search for)\s+(.+?(?:reductase|oxidase|synthase|kinase|phosphatase))(?:\?|$)'  # Common enzyme types
+            # [what] [do|does] [the] <papers|literature|references> say about <X>
+            r'(?:what\s+)?(?:do|does\s+)?(?:the\s+)?(?:papers|literature|references)\s+say\s+about\s+(.+?)(?:\?|$)'
         ]
         
         print("\n=== Literature Query Detection Debug ===")

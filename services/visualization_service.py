@@ -36,7 +36,7 @@ class VisualizationType:
         
         Args:
             fig: The plotly figure to update
-            view_settings: Dictionary of view settings (zoom, center, range, etc.)
+            view_settings: Dictionary of view settings (zoom, center, range, shapes, etc.)
             
         Returns:
             Updated figure with view settings applied
@@ -71,6 +71,10 @@ class VisualizationType:
                 axis = key.split('.')[0]
                 layout_updates[axis] = layout_updates.get(axis, {})
                 layout_updates[axis]['domain'] = value
+                
+            elif key == 'shapes':
+                # Restore any drawn shapes
+                layout_updates['shapes'] = value
         
         # Update the figure layout
         if layout_updates:
@@ -254,15 +258,15 @@ class BubblePlot(VisualizationType):
                     gridcolor='LightGray',
                     title=params['y_column']
                 ),
-                dragmode='pan',
+                dragmode='pan',  # Enable panning
                 modebar=dict(
                     orientation='h',
                     bgcolor='rgba(255,255,255,0.7)',
                     color='rgb(128,128,128)',
                     activecolor='rgb(50,50,50)'
                 ),
-                selectdirection=None,
-                clickmode='event',
+                selectdirection='any',  # Enable selection in any direction
+                clickmode='event+select',  # Enable both event and selection modes
                 hovermode='closest'
             )
             
@@ -761,22 +765,15 @@ class GeoMap(VisualizationType):
                     x=0.5,
                     xanchor='center'
                 ),
-                dragmode='pan',  # Enable panning by default
+                dragmode='pan',  # Enable panning
                 modebar=dict(
-                    orientation='h',  # Horizontal orientation
+                    orientation='h',
                     bgcolor='rgba(255,255,255,0.7)',
                     color='rgb(128,128,128)',
                     activecolor='rgb(50,50,50)'
                 ),
-                legend=dict(
-                    yanchor="top",
-                    y=0.99,
-                    xanchor="right",
-                    x=0.99,
-                    bgcolor='rgba(255,255,255,0.7)'
-                ),
-                selectdirection=None,  # Disable selection by default
-                clickmode='event',  # Changed from 'event+select'
+                selectdirection='any',  # Enable selection in any direction
+                clickmode='event+select',  # Enable both event and selection modes
                 hovermode='closest'
             )
             
@@ -919,7 +916,8 @@ class VisualizationService(ChatService):
                         'type': params['type'],
                         'params': viz_params,
                         'df': df.to_dict('records'),
-                        'view_settings': context.get('viz_state', {}).get('view_settings', {})
+                        'view_settings': context.get('viz_state', {}).get('view_settings', {}),
+                        'figure': fig.to_dict()  # Add the figure to the state
                     }
                 }
             )

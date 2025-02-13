@@ -18,6 +18,8 @@ from .test_service import StoreReportService
 from .literature_service import LiteratureService
 from .index_search_service import IndexSearchService
 from .visualization_service import VisualizationService
+from .database_service import DatabaseService
+from .dataset_service import DatasetService
 
 # Create global service registry
 registry = ServiceRegistry()
@@ -26,11 +28,15 @@ registry = ServiceRegistry()
 store_report_service = StoreReportService()
 literature_service = LiteratureService()
 visualization_service = VisualizationService()
+database_service = DatabaseService()
+dataset_service = DatasetService()
 
 # Register basic services
 registry.register(store_report_service)
 registry.register(literature_service)
 registry.register(visualization_service)
+registry.register(database_service)
+registry.register(dataset_service)
 
 def initialize_index_search(text_searcher: Any, text_searcher_db: Any) -> None:
     """Initialize the index search service with available searchers.
