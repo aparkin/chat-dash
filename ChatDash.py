@@ -89,6 +89,8 @@ from services import registry as service_registry
 from services import ServiceMessage
 from services import initialize_index_search
 from dash.exceptions import PreventUpdate
+from services import PreviewIdentifier
+from services.base import ServiceContext  # Import at top for type hint
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore', category=Warning)
@@ -647,21 +649,10 @@ initialize_index_search(text_searcher, text_searcher_db)
 def create_system_message(dataset_info: List[Dict[str, Any]], 
                          search_query: Optional[str] = None,
                          database_structure: Optional[Dict] = None,
-                         weaviate_results: Optional[Dict] = None,
-                         service_context: Optional[Dict] = None) -> str:
+                         weaviate_results: Optional[Dict] = None) -> str:
     """Create system message with context from datasets, database, and literature."""
-    print("\n=== System Message Creation Debug ===")
-    print(f"Database structure type: {type(database_structure)}")
-    if database_structure:
-        try:
-            first_table = next(iter(database_structure.items()))
-            print(f"First table entry: {first_table[0]} (type: {type(first_table[0])})")
-            print(f"First table info: {first_table[1]}")
-        except Exception as e:
-            print(f"Error inspecting database structure: {str(e)}")
 
     base_message = "You are a data analysis assistant with access to:"
-
     # Track available data sources
     has_datasets = bool(dataset_info)
     has_database = bool(database_structure)
@@ -698,7 +689,88 @@ def create_system_message(dataset_info: List[Dict[str, Any]],
                 base_message += "\nForeign Keys:"
                 for fk in info['foreign_keys']:
                     base_message += f"\n  - {fk['from']} → {fk['table']}.{fk['to']}"
-        
+
+    base_message += "You are also involved in an interactive conversation with a user trying to analyze information in the various datasources to which you have access."
+    base_message += "You also have accesses to a portion of the chat history as context."
+    base_message += "You are able to use the chat history to inform your responses."
+    base_message += """
+    You should always summarize how much context from chat history you are able to see (number of each type of message)
+    In the chat history, you will see messages from the user, other services, and yourself.
+    If service messages immediately follow the last user message, you should use the service's response as context.
+    You should not repeat that information but rather summarize its relationship to information you have about any datasets or databases that we mention above.
+    If the last message is a user message, you should analyze the chat history and any information we have about datasets and the database to inform your response.
+    In any case, in your response you should follow these guidelines:
+    """
+    # Add knowledge retrieval instructions first
+    base_message += "\n\nKnowledge Integration:"
+    base_message += "\n1. First, provide relevant background knowledge from your training:"
+    base_message += "\n   - Explain key concepts, terminology, and relationships"
+    base_message += "\n   - Describe standard methodologies or approaches"
+    base_message += "\n   - Highlight important considerations or limitations"
+    base_message += "\n2. Then suggest how to explore this knowledge using available data sources:"
+    base_message += "\n   - Identify relevant fields or patterns to search for"
+    base_message += "\n   - Propose specific analyses or comparisons"
+    base_message += "\n   - Structure suggestions to help formulate targeted queries"
+
+    base_message += "\n\nChat History Context:"
+    base_message += "\n1. The most recent messages in the chat history contain important context:"
+    base_message += "\n   - Pay special attention to service messages that immediately follow user messages"
+    base_message += "\n   - Build upon service responses rather than repeating their content"
+    base_message += "\n   - Focus on adding value through analysis and connections to other data"
+    
+    base_message += "\n\n2. When responding to follow-up questions:"
+    base_message += "\n   - Check if there's a service message responding to the previous message"
+    base_message += "\n   - If yes, use that response as context but don't repeat it"
+    base_message += "\n   - If no, proceed with a direct response"
+    base_message += "\n   - Connect new requests to previously discussed data or analyses"
+    base_message += "\n   - Maintain continuity in multi-step analyses or explorations"
+    
+    base_message += "\n\n3. Service Message Handling:"
+    base_message += "\n   - Service messages contain authoritative responses about queries, data, or operations"
+    base_message += "\n   - When you see a service message following a user query:"
+    base_message += "\n     * Use it as the primary response to that query"
+    base_message += "\n     * Add analysis and insights to the service's results"
+    base_message += "\n     * Suggest next steps based on the service's results"
+    base_message += "\n     * DO NOT restate what the service has already said"
+    base_message += "\n     * DO NOT suggest new queries when service has already returned results"
+    base_message += "\n     * For search results, analyze the returned data rather than suggesting new searches"
+    
+    base_message += "\n\n4. Progressive Analysis:"
+    base_message += "\n   - Build upon previous analyses and visualizations"
+    base_message += "\n   - Reference previous findings when suggesting new approaches"
+    base_message += "\n   - Maintain context when refining or expanding previous queries"
+    base_message += "\n   - Focus on adding new insights rather than repeating known information"
+    base_message += "\n   - When search results are provided, analyze those results rather than suggesting new searches"
+    # Add instructions for handling different types of queries
+    base_message += "\n\nWhen responding to the user's message:"
+
+    if has_datasets:
+        base_message += "\n- If the query relates to the available datasets, suggest ways to analyze the data"
+        base_message += "\n- If you find relevant information in the datasets, include it in your response"
+        base_message += "\n- Remember: Datasets are separate from the database and cannot be queried using SQL"
+        base_message += "\n- To analyze datasets, suggest the user use the available visualization and analysis tools with specific suggestions"
+    
+    if has_database:
+        base_message += "\n- If you recognize a SQL query, analyze it and suggest improvements if needed"
+        base_message += "\n- If you receive a natural language database question, propose an appropriate SQL query"
+        base_message += "\n- DO NOT execute SQL queries directly - only suggest them for the user to execute"
+        base_message += "\n- DO NOT claim to have run queries unless the user has explicitly executed them"
+        base_message += "\n- Ensure all SQL queries are valid for SQLite and don't use extended features"
+    else:
+        base_message += "\n- DO NOT suggest or reference SQL queries"
+        base_message += "\n- Focus on other available data sources and general knowledge"
+    
+    if has_literature:
+        base_message += "\n- You have access to a scientific literature database through Weaviate"
+        base_message += "\n- For literature queries, use the available search functionality"
+        base_message += "\n- When referencing literature results, use the [ID] format"
+    
+    base_message += "\n- You can combine available data sources with general knowledge"
+    base_message += "\n- If no specific data is found, provide a helpful response using your general knowledge"
+    base_message += "\n- NEVER suggest querying data sources that are not currently connected"
+    base_message += "\n- NEVER claim to have executed queries or retrieved data unless explicitly done by the user"
+
+    if has_database:
         # Enhanced SQL Guidelines
         base_message += "\n\nSQL Query Guidelines:"
         
@@ -756,83 +828,9 @@ def create_system_message(dataset_info: List[Dict[str, Any]],
         # 5. Execution Instructions
         base_message += "\n\n5. Query Execution:"
         base_message += "\n   Users can execute queries using:"
-        base_message += '\n   - "execute." to run the primary (original) query'
-        base_message += '\n   - "execute query_ID" to run a specific query'
+        base_message += '\n   - "search." or "query."to run the primary (original) query'
+        base_message += '\n   - "search|query query_ID" to run a specific query'
         base_message += '\n   - "convert query_ID to dataset" to save results'
-
-    # Add literature information
-    if has_literature_results:
-        try:
-            results = weaviate_results.get('unified_results', [])
-            if results:
-                base_message += "\n\nLiterature Database Results:"
-                base_message += f"\nFound {len(results)} relevant items:"
-                # Show top 5 results with key information
-                for result in results[:5]:
-                    # Extract title and score safely
-                    title = result.get('properties', {}).get('title', 'Untitled')
-                    score = result.get('score', 0.0)
-                    result_id = result.get('id', 'unknown')
-                    # Truncate title if too long
-                    if len(title) > 100:
-                        title = title[:97] + "..."
-                    base_message += f"\n- [{result_id}] {title} (Score: {score:.2f})"
-                
-                if len(results) > 5:
-                    base_message += f"\n... and {len(results) - 5} more results"
-                
-                base_message += "\n\nPlease incorporate these findings in your response."
-        except Exception as e:
-            print(f"Error processing Weaviate results: {str(e)}")
-            print(f"Result structure: {json.dumps(results[0] if results else {}, indent=2)}")
-            base_message += "\n\nLiterature Database: Error processing results"
-    elif weaviate_results is not None:  # We attempted a literature search but got no results
-        base_message += "\n\nLiterature Database: No relevant results found for your query"
-
-    # Add instructions for handling different types of queries
-    base_message += "\n\nWhen responding to queries:"
-    
-    # Add knowledge retrieval instructions first
-    base_message += "\n\nKnowledge Integration:"
-    base_message += "\n1. First, provide relevant background knowledge from your training:"
-    base_message += "\n   - Explain key concepts, terminology, and relationships"
-    base_message += "\n   - Describe standard methodologies or approaches"
-    base_message += "\n   - Highlight important considerations or limitations"
-    base_message += "\n2. Then suggest how to explore this knowledge using available data sources:"
-    base_message += "\n   - Identify relevant fields or patterns to search for"
-    base_message += "\n   - Propose specific analyses or comparisons"
-    base_message += "\n   - Structure suggestions to help formulate targeted queries"
-    
-    if has_datasets:
-        base_message += "\n- If the query relates to the available datasets, analyze that data"
-        base_message += "\n- If you find relevant information in the datasets, include it in your response"
-        base_message += "\n- Remember: Datasets are separate from the database and cannot be queried using SQL"
-        base_message += "\n- To analyze datasets, use the available visualization and analysis tools"
-    
-    if has_database:
-        base_message += "\n- If you recognize a SQL query, analyze it and suggest improvements if needed"
-        base_message += "\n- If you receive a natural language database question, propose an appropriate SQL query"
-        base_message += "\n- DO NOT execute SQL queries directly - only suggest them for the user to execute"
-        base_message += "\n- DO NOT claim to have run queries unless the user has explicitly executed them"
-        base_message += "\n- Ensure all SQL queries are valid for SQLite and don't use extended features"
-    else:
-        base_message += "\n- The database is not connected - DO NOT suggest or reference SQL queries"
-        base_message += "\n- Focus on other available data sources and general knowledge"
-    
-    if has_literature:
-        base_message += "\n- You have access to a scientific literature database through Weaviate"
-        base_message += "\n- For literature queries, use the available search functionality"
-        base_message += "\n- When referencing literature results, use the [ID] format"
-    
-    base_message += "\n- You can combine available data sources with general knowledge"
-    base_message += "\n- If no specific data is found, provide a helpful response using your general knowledge"
-    base_message += "\n- NEVER suggest querying data sources that are not currently connected"
-    base_message += "\n- NEVER claim to have executed queries or retrieved data unless explicitly done by the user"
-
-    if service_context:
-        base_message += "\n\nService Context:"
-        for key, value in service_context.items():
-            base_message += f"\n- {key}: {value}"
 
     return base_message
 
@@ -1486,10 +1484,12 @@ def validate_dataset(df: pd.DataFrame, filename: str) -> tuple[bool, str]:
     [Output('chat-history', 'children'),
      Output('chat-input', 'value', allow_duplicate=True),
      Output('chat-store', 'data'),
-     Output('dataset-tabs', 'active_tab', allow_duplicate=True),  # Fix hyphen to underscore
+     Output('dataset-tabs', 'active_tab', allow_duplicate=True),
      Output('viz-state-store', 'data'),
      Output('chat-loading-output', 'children', allow_duplicate=True),
-     Output('successful-queries-store', 'data', allow_duplicate=True)],  # Add output for store
+     Output('successful-queries-store', 'data', allow_duplicate=True),
+     Output('datasets-store', 'data', allow_duplicate=True),
+     Output('dataset-list', 'children', allow_duplicate=True)],
     [Input('send-button', 'n_clicks')],
     [State('chat-input', 'value'),
      State('chat-store', 'data'),
@@ -1503,12 +1503,50 @@ def validate_dataset(df: pd.DataFrame, filename: str) -> tuple[bool, str]:
 )
 def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, selected_dataset, database_state, database_structure_store, successful_queries):
     """Process chat messages and handle various command types."""
+
+    # Smart context selection
+    def get_relevant_context(current_msg: dict, history: list, max_context: int = 6) -> list:
+        """Select relevant context messages, preserving order and relationships."""
+        context = []
+        # Always include the current message
+        context.append(current_msg)
+        
+        # Look backwards through history for relevant messages
+        for msg in reversed(history[:-1]):  # Exclude current message
+            if len(context) >= max_context:
+                break
+                
+            # Check relevance based on content
+            content = msg['content'].lower()
+            current_content = current_msg['content'].lower()
+            
+            # Always include the immediate previous message
+            if len(context) == 1:
+                context.insert(0, msg)
+                continue
+            
+            # Include messages with SQL blocks
+            if '```sql' in content:
+                context.insert(0, msg)
+                continue
+                
+            # Include messages that seem related by content
+            # Look for shared significant terms (excluding common words)
+            current_terms = set(re.findall(r'\b\w+\b', current_content))
+            msg_terms = set(re.findall(r'\b\w+\b', content))
+            shared_terms = current_terms & msg_terms
+            if len(shared_terms) >= 2:  # At least 2 significant shared terms
+                context.insert(0, msg)
+                
+        return context
+
     try:
         if not input_value:
-            return (dash.no_update,) * 7
+            return (dash.no_update,) * 9  # Updated for all outputs
             
         chat_history = chat_history or []
         current_message = {'role': 'user', 'content': input_value.strip()}
+        context = get_relevant_context(current_message, chat_history)
 
         # Handle help request
         if input_value.lower().strip() in ["help", "help me", "what can i do?", "what can i do", "what can you do?", "what can you do"]:
@@ -1519,16 +1557,22 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
             })
             return (
                 create_chat_elements_batch(chat_history),
-                '',
+                '',  # Clear input after help
                 chat_history,
                 dash.no_update,
                 dash.no_update,
                 "",
-                dash.no_update  # No store update needed
+                dash.no_update,  # No store update needed
+                dash.no_update,  # No datasets update needed
+                dash.no_update   # No dataset list update needed
             )
         
         # Add service detection wrapper
         handlers = service_registry.detect_handlers(input_value)
+        
+        # Add message to chat history first
+        chat_history.append(current_message)
+        
         if len(handlers) > 1:
             # Multiple services detected - add warning message
             warning = ServiceMessage(
@@ -1546,9 +1590,6 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
             print(f"Executing service: {service_name}")
             
             try:
-                # Add message to chat history first
-                chat_history.append(current_message)
-                
                 # Parse request
                 params = service.parse_request(input_value)
                 
@@ -1559,6 +1600,7 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                     'selected_dataset': selected_dataset,
                     'database_state': database_state,
                     'database_structure': database_structure_store,
+                    'chat_history': chat_history,  # Add chat history to context
                     'timestamp': datetime.now().isoformat()
                 }
                 
@@ -1579,7 +1621,7 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                             'selected': name == selected_dataset
                         } for name, data in datasets.items()] if datasets else [],
                         database_structure=database_structure_store,
-                        service_context=response.context.to_dict()
+                        #service_context=response.context if response.context else None
                     )
                 else:
                     system_message = create_system_message(
@@ -1593,11 +1635,8 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                     )
                 
                 # Get LLM response
-                messages = [
-                    {'role': 'system', 'content': system_message},
-                    *[{'role': msg['role'], 'content': str(msg['content'])} for msg in chat_history]
-                ]
-                
+                messages = get_context_messages(system_message, chat_history)
+
                 llm_response = client.chat.completions.create(
                     model=model,
                     messages=messages,
@@ -1605,56 +1644,82 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                     max_tokens=8192
                 )
 
-                llm_response = llm_response.choices[0].message.content
+                # Extract content from response
+                ai_response = llm_response.choices[0].message.content
+                
                 # Process SQL blocks if present
-                if '```sql' in llm_response.lower():
-                    llm_response = add_query_ids_to_response(llm_response)
+                if '```sql' in ai_response.lower():
+                    ai_response = add_query_ids_to_response(ai_response)
                 
                 # Add LLM response to chat
                 chat_history.append({
                     'role': 'assistant',
-                    'content': llm_response
+                    'content': ai_response
                 })
                 
                 # Update stores if needed
                 if response.store_updates:
-                    successful_queries.update(response.store_updates)
+                    # Update each store separately
+                    if 'successful_queries_store' in response.store_updates:
+                        # Merge updates instead of replacing
+                        successful_queries = {
+                            **successful_queries,
+                            **response.store_updates['successful_queries_store']
+                        }
+                    if 'datasets_store' in response.store_updates:
+                        # Merge updates instead of replacing
+                        datasets = {
+                            **datasets,
+                            **response.store_updates['datasets_store']
+                        }
+                        # Update dataset list when datasets store changes
+                        dataset_list = [create_dataset_card(name, data) for name, data in datasets.items()]
+                    else:
+                        dataset_list = dash.no_update
+                else:
+                    dataset_list = dash.no_update
+                
+                # Get chat input value from state updates or default to dash.no_update
+                # TODO: Not sure why I am doing this right now. 
+                chat_input_value = response.state_updates.get('chat_input', dash.no_update)
                 
                 # Return with any state updates
                 return (
                     create_chat_elements_batch(chat_history),
-                    '',
+                    chat_input_value,  # Use service's chat input value
                     chat_history,
                     response.state_updates.get('active_tab', dash.no_update),
                     response.state_updates.get('viz_state', dash.no_update),
                     "",
-                    successful_queries
+                    successful_queries,  # Return the updated queries store
+                    datasets,  # Return the updated datasets store
+                    dataset_list  # Return the updated dataset list
                 )
                 
             except Exception as e:
-                print(f"Service execution error: {str(e)}")
+                print(f"Service execution error in handle_chat_message: {str(e)}")
+
                 error_msg = ServiceMessage(
                     service=service_name,
                     content=f"Error executing service: {str(e)}",
                     message_type="error"
                 )
+
                 chat_history.append(error_msg.to_chat_message())
+
                 return (
                     create_chat_elements_batch(chat_history),
-                    '',
+                    dash.no_update,  # Changed from '' to dash.no_update
                     chat_history,
                     dash.no_update,
                     dash.no_update,
                     "",
-                    successful_queries
+                    successful_queries,
+                    dash.no_update,
+                    dash.no_update
                 )
 
-        # Skip old literature handling if service handled it
-        literature_service_handled = any(
-            handler[1].name == "literature" 
-            for handler in service_registry.detect_handlers(input_value)
-        )
-                    
+        print('No services detected')            
         chat_history.append(current_message)
         
         # Create system message with all available context
@@ -1668,79 +1733,40 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
             database_structure=database_structure_store
         )
 
-        # Smart context selection
-        def get_relevant_context(current_msg: dict, history: list, max_context: int = 6) -> list:
-            """Select relevant context messages, preserving order and relationships."""
-            context = []
-            # Always include the current message
-            context.append(current_msg)
-            
-            # Look backwards through history for relevant messages
-            for msg in reversed(history[:-1]):  # Exclude current message
-                if len(context) >= max_context:
-                    break
-                    
-                # Check relevance based on content
-                content = msg['content'].lower()
-                current_content = current_msg['content'].lower()
-                
-                # Always include the immediate previous message
-                if len(context) == 1:
-                    context.insert(0, msg)
-                    continue
-                
-                # Include messages with SQL blocks
-                if '```sql' in content:
-                    context.insert(0, msg)
-                    continue
-                    
-                # Include messages that seem related by content
-                # Look for shared significant terms (excluding common words)
-                current_terms = set(re.findall(r'\b\w+\b', current_content))
-                msg_terms = set(re.findall(r'\b\w+\b', content))
-                shared_terms = current_terms & msg_terms
-                if len(shared_terms) >= 2:  # At least 2 significant shared terms
-                    context.insert(0, msg)
-                    
-            return context
+        # Use full chat history for context
+        messages = get_context_messages(system_message, chat_history)  # Changed from context to chat_history
         
-        if True:
-            # Handle non-search queries
-            context = get_relevant_context(current_message, chat_history)
-            messages = [
-                {'role': 'system', 'content': system_message},
-                *[{'role': msg['role'], 'content': str(msg['content'])} for msg in context]
-            ]
-            
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.4,
-                max_tokens=8192
-            )
-            
-            ai_response = response.choices[0].message.content
-            
-            # Process SQL blocks if present
-            if '```sql' in ai_response.lower():
-                ai_response = add_query_ids_to_response(ai_response)
-            
-            chat_history.append({'role': 'assistant', 'content': ai_response})
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.4,
+            max_tokens=8192
+        )
+        
+        ai_response = response.choices[0].message.content
+        
+        # Process SQL blocks if present
+        if '```sql' in ai_response.lower():
+            ai_response = add_query_ids_to_response(ai_response)
+        
+        chat_history.append({'role': 'assistant', 'content': ai_response})
         
         return (
             create_chat_elements_batch(chat_history),
-            '',
+            dash.no_update,  # Changed from '' to dash.no_update
             chat_history,
             dash.no_update,
             dash.no_update,
             "",
-            successful_queries  # Add the store to all returns
+            successful_queries,  # Add the store to all returns
+            dash.no_update,
+            dash.no_update
         )
         
     except Exception as e:
         print(f"Error in handle_chat_message: {str(e)}")
         print(traceback.format_exc())
-        return (dash.no_update,) * 7  # Updated for new output
+        return (dash.no_update,) * 9  # Updated for all outputs
 
 ####################################
 #
@@ -1859,57 +1885,6 @@ def download_chat_history(n_clicks, chat_history):
         filename=filename,
         type='application/json'
     )
-
-# Add a new callback for handling the API call
-@callback(
-    [Output('chat-history', 'children', allow_duplicate=True),
-     Output('chat-store', 'data', allow_duplicate=True),
-     Output('chat-input', 'value', allow_duplicate=True),
-     Output('chat-loading-output', 'children', allow_duplicate=True)],
-    [Input('chat-store', 'data')],
-    [State('model-selector', 'value')],
-    prevent_initial_call='initial_duplicate'
-)
-def process_api_call(chat_history, model):
-    """Handle API calls to the AI model."""
-    if not chat_history or len(chat_history) == 0:
-        return dash.no_update, dash.no_update, dash.no_update, ""
-    
-    # Only process if the last message is from the user
-    if chat_history[-1]['role'] != 'user':
-        return dash.no_update, dash.no_update, dash.no_update, ""
-    
-    try:
-        messages = [
-            {'role': msg['role'], 'content': msg['content']}
-            for msg in chat_history
-        ]
-        print(f"current model: {model}")
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=1000
-        )
-        
-        ai_response = response.choices[0].message.content
-        chat_history.append({
-            'role': 'assistant',
-            'content': ai_response
-        })
-        
-        chat_elements = create_chat_elements_batch(chat_history)
-        return chat_elements, chat_history, '', ""
-
-    except Exception as e:
-
-        error_message = f"Error: {str(e)}"
-        chat_history.append({
-            'role': 'system',
-            'content': error_message
-        })
-        chat_elements = create_chat_elements_batch(chat_history)
-        return chat_elements, chat_history, '', ""
 
 # Optimize chat message processing
 def create_chat_elements_batch(messages: list) -> list:
@@ -2312,15 +2287,34 @@ def render_tab_content(active_tab, selected_dataset, datasets):
             ])
         elif active_tab == "tab-viz":
             return html.Div([
-                html.H4("Data Visualization", style={'color': 'blue'}),  # Make this visible
-                html.Div("Debug: Viz Controls Container", style={'border': '1px solid green', 'padding': '10px', 'margin': '10px'}),
-                html.Div(
+                dcc.Graph(
                     id='viz-container',
-                    children="Debug: Empty Viz Container",
-                    style={'border': '1px solid red', 'padding': '10px', 'margin': '10px', 'minHeight': '200px'}
+                    figure={'data': [], 'layout': {'title': 'No visualization selected'}},
+                    style={'height': '800px', 'width': '100%'},
+                    config={
+                        'scrollZoom': True,
+                        'displaylogo': False,
+                        'responsive': True,
+                        'showAxisDragHandles': True,
+                        'showAxisRangeEntryBoxes': True,
+                        'doubleClick': 'reset+autosize',
+                        'displayModeBar': True,
+                        'modeBarButtonsToAdd': [
+                            'pan', 'select2d', 'lasso2d', 'zoomIn2d', 'zoomOut2d',
+                            'autoScale2d', 'resetScale2d', 'drawline', 'drawopenpath',
+                            'drawclosedpath', 'eraseshape'
+                        ],
+                        'toImageButtonOptions': {
+                            'format': 'png',
+                            'filename': 'plot',
+                            'scale': 3
+                        },
+#                        'hovermode': 'closest',
+                        'displayModeBar': 'hover'
+                    }
                 ),
-                html.Pre(id='viz-debug', children="Debug: Viz Debug Area")  # Add debug area
-            ])
+                html.Pre(id='viz-debug', style={'display': 'none'})  # Keep debug area but hide it
+            ], style={'height': '800px', 'width': '100%', 'position': 'relative'})
             
     except Exception as e:
         return html.Div([
@@ -2547,7 +2541,10 @@ def execute_confirmed_query(input_value, n_clicks, chat_history, database_state,
     """Process chat commands related to SQL query execution and dataset conversion."""
     if not input_value:
         return (dash.no_update,) * 9
-    
+
+    # Temporarily disable query execution while testing service
+    return (dash.no_update,) * 9
+
     # Initialize stores safely
     successful_queries = successful_queries or {}
     chat_history = chat_history or []
@@ -2565,7 +2562,7 @@ def execute_confirmed_query(input_value, n_clicks, chat_history, database_state,
             })
             return (
                 create_chat_elements_batch(chat_history),
-                '',
+                dash.no_update,  # Changed from '' to dash.no_update
                 chat_history,
                 dash.no_update,
                 dash.no_update,
@@ -2631,7 +2628,7 @@ Summary Statistics:
             
         return (
             create_chat_elements_batch(chat_history),
-            '',
+            dash.no_update,  # Changed from '' to dash.no_update
             chat_history,
             dash.no_update,
             dash.no_update,
@@ -2662,7 +2659,7 @@ Summary Statistics:
             })
             return (
                 create_chat_elements_batch(chat_history),  # chat-history
-                '',                                        # chat-input
+                dash.no_update,  # Changed from '' to dash.no_update
                 chat_history,                              # chat-store
                 dash.no_update,                           # dataset-tabs
                 dash.no_update,                           # viz-state-store
@@ -2764,7 +2761,7 @@ Summary Statistics:
             
             return (
                 create_chat_elements_batch(chat_history),  # chat-history
-                '',                                        # chat-input
+                dash.no_update,  # Changed from '' to dash.no_update
                 chat_history,                              # chat-store
                 dash.no_update,                           # dataset-tabs
                 dash.no_update,                           # viz-state-store
@@ -2782,7 +2779,7 @@ Summary Statistics:
             })
             return (
                 create_chat_elements_batch(chat_history),  # chat-history
-                '',                                        # chat-input
+                dash.no_update,  # Changed from '' to dash.no_update
                 chat_history,                              # chat-store
                 dash.no_update,                           # dataset-tabs
                 dash.no_update,                           # viz-state-store
@@ -2806,7 +2803,17 @@ Summary Statistics:
     is_query_reference = bool(query_match)
     
     if not (is_simple_command or is_query_reference):
-        return (dash.no_update,) * 9
+        return (
+            dash.no_update,                           # chat-history
+            dash.no_update,  # Changed from '' to dash.no_update
+            dash.no_update,                           # chat-store
+            dash.no_update,                           # dataset-tabs
+            dash.no_update,                           # viz-state-store
+            "",                                       # chat-loading-output
+            successful_queries,                       # successful-queries-store
+            dash.no_update,                           # datasets-store
+            dash.no_update                            # dataset-list
+        )
         
     print("\nProcessing query execution command...")
     print(f"- Simple command: {is_simple_command}")
@@ -2870,7 +2877,7 @@ Summary Statistics:
         })
         return (
             create_chat_elements_batch(chat_history),  # chat-history
-            '',                                        # chat-input
+            dash.no_update,  # Changed from '' to dash.no_update
             chat_history,                              # chat-store
             dash.no_update,                           # dataset-tabs
             dash.no_update,                           # viz-state-store
@@ -2918,7 +2925,7 @@ Would you like to save these results as a dataset?"""
         
         return (
             create_chat_elements_batch(chat_history),  # chat-history
-            '',                                        # chat-input
+            dash.no_update,  # Changed from '' to dash.no_update
             chat_history,                              # chat-store
             dash.no_update,                           # dataset-tabs
             dash.no_update,                           # viz-state-store
@@ -2936,7 +2943,7 @@ Would you like to save these results as a dataset?"""
         })
         return (
             create_chat_elements_batch(chat_history),  # chat-history
-            '',                                        # chat-input
+            dash.no_update,  # Changed from '' to dash.no_update
             chat_history,                              # chat-store
             dash.no_update,                           # dataset-tabs
             dash.no_update,                           # viz-state-store
@@ -2984,7 +2991,7 @@ def show_help(n_clicks, chat_history):
         'content': help_message
     })
     
-    return '', chat_history, create_chat_elements_batch(chat_history)
+    return dash.no_update, chat_history, create_chat_elements_batch(chat_history)
 
 ####################################
 #
@@ -3036,91 +3043,52 @@ def is_dataset_query(message: str) -> bool:
 
 # Move all callbacks before main
 @callback(
-    [Output('viz-container', 'children'),
+    [Output('viz-container', 'figure'),
      Output('viz-debug', 'children')],
     Input('viz-state-store', 'data')
 )
 def update_visualization(viz_state):
-    """Update visualization based on state store."""
-    if not viz_state or not viz_state.get('type'):
-        return html.Div("No visualization selected"), "Waiting for plot data..."
-        
-    try:
-        # Convert the dictionary records back to DataFrame
-        df = pd.DataFrame(viz_state['df'])
-        
-        # Import visualization service
-        from services import registry
-        viz_service = registry.get_service('visualization')
-        
-        # Get the visualization type
-        viz_type = viz_state['type']
-        if not viz_type or viz_type not in viz_service.viz_types:
-            return html.Div(f"Invalid visualization type: {viz_type}"), "Error: Invalid visualization type"
-            
-        # Create the visualization using the service's visualization type
-        fig = viz_service.viz_types[viz_type].create_figure(viz_state.get('params', {}), df)
-        
-        # Apply any stored view settings
-        if viz_state.get('view_settings'):
-            fig = viz_service.viz_types[viz_type].apply_view_settings(fig, viz_state['view_settings'])
-        
-        # Return the figure with state preservation config
-        return dcc.Graph(
-            id='viz-graph',
-            figure=fig,
-            config={
-                'scrollZoom': True,  # Enable scroll zoom
-                'modeBarButtonsToAdd': [
-                    'drawline', 'drawopenpath',  # Line and path drawing
-                    'drawclosedpath',  # Area selection
-                    'eraseshape',      # Remove selections
-                    'select2d',        # Box selection
-                    'lasso2d',         # Lasso selection
-                    'zoomIn2d',        # Zoom in button
-                    'zoomOut2d',       # Zoom out button
-                    'autoScale2d'      # Auto-scale
-                ],
-                'displaylogo': False,  # Remove plotly logo
-                'responsive': True,    # Make plot responsive
-                'showAxisDragHandles': True,  # Show axis drag handles
-                'showAxisRangeEntryBoxes': True,  # Show range entry boxes
-                'toImageButtonOptions': {
-                    'format': 'png',  # Export format
-                    'filename': 'plot',
-                    'scale': 2  # Increase export resolution
-                },
-                'doubleClick': 'reset+autosize',  # Double click to reset view
-                'displayModeBar': True,  # Always show mode bar
-                'modeBarButtonsToRemove': []  # Keep all default buttons
-            },
-            style={'height': '700px'}
-        ), "Visualization updated successfully"
-            
-    except Exception as e:
-        print(f"Error updating visualization: {str(e)}")
-        return html.Div(f"Error creating visualization: {str(e)}"), f"Error: {str(e)}"
+    """Update visualization when state changes."""
+    if not viz_state:
+        return {'data': [], 'layout': {'title': 'No visualization selected'}}, "No visualization state"
+    
+    if 'error' in viz_state:
+        return {'data': [], 'layout': {'title': f"error creating visualization: {viz_state['error']}"}}, f"Error: {viz_state['error']}"
+    
+    if 'figure' not in viz_state:
+        return {'data': [], 'layout': {'title': 'No figure in visualization state'}}, "No figure in state"
+    
+    return viz_state['figure'], f"Updated figure from state: {list(viz_state.keys())}"
 
 # Add callback to handle figure state updates
 @callback(
     Output('viz-state-store', 'data', allow_duplicate=True),
-    Input('viz-graph', 'relayoutData'),
+    [Input('viz-container', 'relayoutData'),
+     Input('viz-container', 'figure')],
     State('viz-state-store', 'data'),
     prevent_initial_call=True
 )
-def update_figure_state(relayout_data, viz_state):
+def update_figure_state(relayout_data, figure_data, viz_state):
     """Store figure view state when user interacts with the plot."""
-    if not relayout_data or not viz_state:
+    if not viz_state:
         raise PreventUpdate
         
-    # Update the view settings in the state
+    # Initialize view settings if not present
     if not viz_state.get('view_settings'):
         viz_state['view_settings'] = {}
     
-    # Store relevant view settings (zoom, center, etc.)
-    for key in relayout_data:
-        if any(k in key for k in ['zoom', 'center', 'range', 'domain']):
-            viz_state['view_settings'][key] = relayout_data[key]
+    # Update from relayoutData
+    if relayout_data:
+        # Store relevant view settings (zoom, center, etc.)
+        for key in relayout_data:
+            if any(k in key for k in ['zoom', 'center', 'range', 'domain', 'shapes']):
+                viz_state['view_settings'][key] = relayout_data[key]
+    
+    # Update from figure data
+    if figure_data and 'layout' in figure_data:
+        # Store shapes from the figure
+        if 'shapes' in figure_data['layout']:
+            viz_state['view_settings']['shapes'] = figure_data['layout']['shapes']
     
     return viz_state
 
@@ -3179,8 +3147,6 @@ def get_database_structure(db_path: str) -> Dict[str, Any]:
             }
             
         conn.close()
-        print(f"\n=== Database Structure Debug ===")
-        print(f"First table structure: {next(iter(structure.items()))}")
         return structure
         
     except Exception as e:
@@ -3628,80 +3594,158 @@ def update_weaviate_tooltips(state):
     return conn_msg, coll_msg
 
 def generate_query_id(is_original: bool = True, alt_number: Optional[int] = None) -> str:
-    """Generate a unique query ID with timestamp.
+    """Generate a unique query ID with timestamp using PreviewIdentifier.
     
     Args:
         is_original (bool): If True, generates ID for primary query
         alt_number (int, optional): For alternative queries, specifies which alternative (1,2,etc)
         
     Returns:
-        str: Query ID in format query_YYYYMMDD_HHMMSS_(original|altN)
+        str: Query ID in format query_YYYYMMDD_HHMMSS_(orig|altN)
     """
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    
     if is_original:
-        suffix = '_original'
+        return PreviewIdentifier.create_id(prefix="query")
     else:
-        if alt_number is None:
-            alt_number = 1
-        suffix = f'_alt{alt_number}'
-        
-    return f"query_{timestamp}{suffix}"
+        # For alternatives, we need to create based on the original ID
+        original_id = PreviewIdentifier.create_id(prefix="query")
+        # Then create alternatives from it
+        for _ in range(alt_number or 1):
+            original_id = PreviewIdentifier.create_id(previous_id=original_id)
+        return original_id
 
 def add_query_ids_to_response(response: str) -> str:
-    """Add unique Query IDs to SQL blocks in the response."""
-    print("\n=== SQL Block Processing Debug ===")
-    print(f"First 100 chars: {response[:100]}")
+    """Add service-specific IDs to content blocks in LLM response.
     
-    if '```sql' not in response.lower():
-        print("No SQL blocks detected, returning original response")
-        return response
+    This function:
+    1. Checks each registered service
+    2. If the service finds its content type in the response,
+       lets the service add its IDs to those blocks
+    
+    This allows each service to handle its own content type and ID format.
+    """
+    modified_response = response
+    
+    # Let each service process its content blocks
+    for service_name, service in service_registry._services.items():
+        if service.detect_content_blocks(modified_response):
+            modified_response = service.add_ids_to_blocks(modified_response)
+            
+    return modified_response
+
+def get_api_response(model: str, system_msg: str, messages: list) -> dict:
+    """Get response from API with proper error handling.
+    
+    Args:
+        model: Model to use for completion
+        system_msg: System message with context
+        messages: List of conversation messages
         
+    Returns:
+        Dict with response content and metadata
+    """
     try:
-        # Process SQL blocks
-        modified_response = []
-        current_pos = 0
+        # Prepare messages with system context
+        api_messages = [
+            {'role': 'system', 'content': system_msg}
+        ]
+        api_messages.extend(messages)
         
-        # Use regex to find all SQL blocks
-        sql_block_pattern = r'(```sql\s*\n?)(.*?)(\n?```)'
-        matches = list(re.finditer(sql_block_pattern, response, re.DOTALL | re.IGNORECASE))
+        # Get completion
+        response = client.chat.completions.create(
+            model=model,
+            messages=api_messages,
+            temperature=0.7,
+            max_tokens=1000
+        )
         
-        print(f"Found {len(matches)} SQL blocks")
+        # Extract response
+        content = response.choices[0].message.content
         
-        # Process each block in order
-        for i, match in enumerate(matches):
-            start, end = match.span()
-            modified_response.append(response[current_pos:start])
-            
-            sql_block = match.group(2).strip()
-            # Skip if block already has a Query ID
-            if re.search(r'^--\s*Query ID:', sql_block):
-                modified_response.append(match.group(0))
-            else:
-                # First block gets _original, rest get _altN
-                if i == 0:
-                    query_id = generate_query_id(is_original=True)
-                else:
-                    query_id = generate_query_id(is_original=False, alt_number=i)
-                
-                # Add ID comment at the start of the block
-                modified_block = f"{match.group(1)}-- Query ID: {query_id}\n{sql_block}{match.group(3)}"
-                modified_response.append(modified_block)
-            
-            current_pos = end
-        
-        # Add any remaining text
-        modified_response.append(response[current_pos:])
-        
-        result = ''.join(modified_response)
-        print("\nProcessed response preview:")
-        print(result[:200] + "..." if len(result) > 200 else result)
-        return result
+        return {
+            'role': 'assistant',
+            'content': content,
+            'timestamp': datetime.now().isoformat()
+        }
         
     except Exception as e:
-        print(f"Error processing SQL blocks: {str(e)}")
-        return response
+        print(f"API call error: {str(e)}")
+        return {
+            'role': 'system',
+            'content': f"Error calling API: {str(e)}",
+            'type': 'error'
+        }
+
+def count_tokens(text: str) -> int:
+    """Rough estimate of token count. Each word is approximately 1.3 tokens."""
+    return int(len(text.split()) * 1.3)
+
+def get_context_messages(system_message: str, chat_history: list, max_tokens: int = 8000) -> list:
+    """Get as many messages as possible within token limit, prioritizing recent messages.
+    
+    Args:
+        system_message: The system prompt
+        chat_history: Full chat history
+        max_tokens: Maximum tokens to allow
+        
+    Returns:
+        List of messages within token limit, in chronological order
+    """
+    # First count tokens for recent messages
+    recent_messages = []
+    token_count = 0
+    
+    # Create a special context summary message
+    context_summary = []
+    for msg in reversed(chat_history):
+        msg_tokens = count_tokens(str(msg['content']))
+        if token_count + msg_tokens > (max_tokens * 0.7):  # Leave room for system message
+            break
+            
+        # Format message based on type
+        if 'service' in msg:
+            context_summary.append(f"Previous service response ({msg['service']}): {msg['content']}")
+        else:
+            context_summary.append(f"Previous {msg['role']} message: {msg['content']}")
+            
+        recent_messages.insert(0, {'role': msg['role'], 'content': str(msg['content'])})
+        token_count += msg_tokens
+    
+    # Create an explicit context message
+    if context_summary:
+        context_message = {
+            'role': 'system',
+            'content': "Previous conversation context:\n\n" + "\n\n".join(reversed(context_summary))
+        }
+        
+        # Start with context message, then system instructions
+        messages = [
+            context_message,
+            {'role': 'system', 'content': system_message}
+        ]
+    else:
+        messages = [{'role': 'system', 'content': system_message}]
+    
+    # Add the actual messages for the conversation
+    messages.extend(recent_messages)
+    
+    # Debug output
+    print(f"\n=== Context Window Stats ===")
+    print(f"Total messages in history: {len(chat_history)}")
+    print(f"Messages included in context: {len(recent_messages)}")
+    print(f"Estimated tokens used: {token_count}/{max_tokens}")
+    print(f"Message types included: {[msg['role'] for msg in messages]}")
+    print("\n=== Message Order ===")
+    for i, msg in enumerate(messages):
+        print(f"\nMessage {i}:")
+        print(f"Role: {msg['role']}")
+        print(f"Content preview: {msg['content'][:100]}...")
+        if 'service' in msg:
+            print(f"Service: {msg.get('service')}")
+            print(f"Type: {msg.get('type')}")
+    
+    return messages
 
 if __name__ == '__main__':
     # Start the app
     app.run_server(debug=True, host='0.0.0.0', port=8051)
+
