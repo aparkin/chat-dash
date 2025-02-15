@@ -20,7 +20,6 @@ from .base import (
     ChatService, 
     ServiceResponse, 
     ServiceMessage, 
-    ServiceContext,
     PreviewIdentifier
 )
 
@@ -369,61 +368,12 @@ Execution plan:
 
 To convert your result to a dataset you can use 'convert {query_id} to dataset'"""
                     
-                    # Create focused context for result analysis
-                    service_context = ServiceContext(
-                        source=self.name,
-                        data={
-                            'service_type': 'database',
-                            'command_state': {
-                                'type': 'query_execution',
-                                'status': 'completed',
-                                'query_id': query_id,
-                                'query_text': query_text,
-                                'execution_time': datetime.now().isoformat()
-                            },
-                            'results': {
-                                'preview': results.head().to_dict('records'),
-                                'total_rows': len(results),
-                                'columns': list(results.columns),
-                                'referenced_tables': metadata.get('referenced_tables', []),
-                                'execution_plan': metadata['execution_plan']
-                            },
-                            'action': 'query_execution',
-                            'status': 'completed'
-                        },
-                        metadata={
-                            'task': 'analyze_query_results',
-                            'execution_status': 'completed',
-                            'service_action': 'database_query',
-                            'analysis_prompts': [
-                                "This is a completed database query. Please analyze the SQL query results:",
-                                "- Summarize the key information shown in the results",
-                                "- Note any patterns or interesting findings in the data",
-                                "- Suggest relevant follow-up queries or analyses based on these results",
-                                "- Identify relationships with other tables or data sources",
-                                "- Consider the execution plan for performance insights",
-                                f"Note: You can convert these results to a dataset using 'convert {query_id} to dataset'"
-                            ]
-                        }
-                    )
-                    
-                    print("\n=== Execute Command Response ===")
-                    print(f"Has context: {bool(service_context)}")
-                    print(f"Context source: {service_context.source}")
-                    print("Context data:")
-                    for key, value in service_context.data.items():
-                        print(f"  {key}: {value}")
-                    print("Context metadata:")
-                    for key, value in service_context.metadata.items():
-                        print(f"  {key}: {value}")
-                    
                     return ServiceResponse(
                         messages=[ServiceMessage(
                             service=self.name,
                             content=response,
                             message_type="info"
                         )],
-                        context=service_context,
                         store_updates=store_updates,
                         state_updates={'chat_input': ''}
                     )
@@ -490,54 +440,12 @@ To convert your result to a dataset you can use 'convert {query_id} to dataset'"
                     
                     overview.append("")  # Add spacing between tables
                 
-                print("\n=== Info Command Response ===")
-                print(f"Structure keys: {list(structure.keys())}")
-                print("Sample table info:")
-                if structure:
-                    sample_table = next(iter(structure.items()))
-                    print(f"  Table: {sample_table[0]}")
-                    print(f"  Row count: {sample_table[1]['row_count']}")
-                    print(f"  Columns: {len(sample_table[1]['columns'])}")
-                print("Message content preview:")
-                print("\n".join(overview[:5]) + "...")
-
-                # Create focused context for database structure
-                service_context = ServiceContext(
-                    source=self.name,
-                    data={
-                        'service_type': 'database',
-                        'command_state': {
-                            'type': 'info',
-                            'status': 'completed',
-                            'execution_time': datetime.now().isoformat()
-                        },
-                        'structure': structure,  # Pass the entire structure directly
-                        'action': 'database_info',  # Add required action field
-                        'status': 'completed'      # Add required status field
-                    },
-                    metadata={
-                        'task': 'database_overview',
-                        'execution_status': 'completed',
-                        'service_action': 'database_info',
-                        'analysis_prompts': [
-                            "This is a database structure overview. Please analyze:",
-                            "- Summarize the key tables and their purposes based on their structure",
-                            "- Identify and explain important relationships between tables",
-                            "- Note any interesting schema design patterns or constraints",
-                            "- Suggest relevant queries that could be run to explore the data",
-                            "- Identify potential data analysis opportunities based on the schema",
-                            "- Consider performance implications of the current structure"
-                        ]
-                    }
-                )
-                
                 return ServiceResponse(
                     messages=[ServiceMessage(
                         service=self.name,
                         content="\n".join(overview),
                         message_type="info"
                     )],
-                    context=service_context,
                     state_updates={'chat_input': ''}
                 )
             
@@ -667,18 +575,7 @@ To convert your result to a dataset you can use 'convert {query_id} to dataset'"
                 service=self.name,
                 content="\n".join(summary),
                 message_type="info" if passed == total else "warning"
-            )],
-            context=ServiceContext(
-                source=self.name,
-                data={
-                    'test_results': {
-                        'passed': passed,
-                        'total': total,
-                        'details': test_results
-                    }
-                },
-                metadata={'test_timestamp': datetime.now().isoformat()}
-            )
+            )]
         )
 
     def detect_content_blocks(self, text: str) -> List[Tuple[str, int, int]]:
@@ -801,49 +698,6 @@ To convert your result to a dataset you can use 'convert {query_id} to dataset'"
                     'referenced_tables': metadata.get('referenced_tables', [])
                 }
             }
-
-            # Create focused context for conversion
-            service_context = ServiceContext(
-                source=self.name,
-                data={
-                    'service_type': 'database',
-                    'command_state': {
-                        'type': 'dataset_conversion',
-                        'status': 'completed',
-                        'query_id': query_id,
-                        'execution_time': datetime.now().isoformat()
-                    },
-                    'conversion_result': {
-                        'dataset_name': query_id,
-                        'rows': len(results),
-                        'columns': list(results.columns),
-                        'source': {
-                            'type': 'sql_query',
-                            'query_id': query_id,
-                            'query_text': stored['sql'],
-                            'execution_plan': metadata['execution_plan']
-                        },
-                        'referenced_tables': metadata.get('referenced_tables', []),
-                        'preview': results.head().to_dict('records')
-                    },
-                    'action': 'dataset_conversion',
-                    'status': 'completed'
-                },
-                metadata={
-                    'task': 'query_result_conversion',
-                    'execution_status': 'completed',
-                    'service_action': 'dataset_conversion',
-                    'analysis_prompts': [
-                        "This query result has been converted to a dataset. Please analyze:",
-                        "- Summarize the key characteristics of the converted dataset",
-                        "- Explain how this dataset relates to its source tables",
-                        "- Note any important patterns or distributions in the preview data",
-                        "- Suggest potential analyses that could be performed with this dataset",
-                        "- Identify opportunities to combine this with other available data sources",
-                        "- Consider any data quality or completeness implications"
-                    ]
-                }
-            )
             
             return ServiceResponse(
                 messages=[ServiceMessage(
@@ -856,7 +710,6 @@ To convert your result to a dataset you can use 'convert {query_id} to dataset'"
 - Referenced tables: {', '.join(metadata.get('referenced_tables', []))}""",
                     message_type="info"
                 )],
-                context=service_context,
                 store_updates={
                     'datasets_store': datasets,  # Update datasets store
                     'successful_queries_store': {  # Update queries store, removing the converted query

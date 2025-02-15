@@ -5,7 +5,7 @@ This service provides a simple store reporting functionality to test the service
 """
 
 from typing import Dict, Any
-from .base import ChatService, ServiceResponse, ServiceMessage, ServiceContext, PreviewIdentifier
+from .base import ChatService, ServiceResponse, ServiceMessage, PreviewIdentifier
 
 class StoreReportService(ChatService):
     """Service that reports on the contents of data stores."""
@@ -120,26 +120,8 @@ class StoreReportService(ChatService):
                 role="assistant"
             ))
         
-        # Create context for LLM with analysis prompts
-        service_context = ServiceContext(
-            source=self.name,
-            data=summary_data,
-            metadata={
-                'report_type': 'store_contents',
-                'timestamp': context.get('timestamp'),
-                'analysis_prompts': [
-                    "Please analyze the current state of the data stores and provide insights about:",
-                    "- The overall data availability across datasets and queries",
-                    "- Any patterns or relationships between datasets and queries",
-                    "- Suggestions for what the user might want to do next based on the available data",
-                    "- Any potential data management concerns or recommendations"
-                ]
-            }
-        )
-        
         return ServiceResponse(
             messages=messages,
-            context=service_context
         )
     
     def _get_query_details(self, query_data: Dict[str, Any]) -> str:

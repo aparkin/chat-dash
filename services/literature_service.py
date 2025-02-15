@@ -15,7 +15,6 @@ from .base import (
     ChatService, 
     ServiceResponse, 
     ServiceMessage, 
-    ServiceContext,
     PreviewIdentifier
 )
 
@@ -592,20 +591,6 @@ Current threshold: {threshold}
                 content=preview,
                 role="assistant"
             )],
-            context=ServiceContext(
-                source=self.name,
-                data=self._create_safe_context(df, params),
-                metadata={
-                    'preview_id': preview_id,
-                    'analysis_prompts': [
-                        "Based on the literature search results, please:",
-                        "- Assess the overall relevance of the matches",
-                        "- Identify key themes from the visible results",
-                        "- Suggest if threshold adjustment might help",
-                        "- Note that only refinement and dataset conversion are available actions"
-                    ]
-                }
-            ),
             store_updates=store_updates
         )
             
@@ -622,8 +607,7 @@ Current threshold: {threshold}
                     content=f"❌ Query {params['query_id']} not found in history.",
                     message_type="error",
                     role="assistant"
-                )],
-                context=None
+                )]
             )
             
         # Execute with new threshold
@@ -665,46 +649,5 @@ Current threshold: {threshold}
                 content=preview,
                 role="assistant"
             )],
-            context=ServiceContext(
-                source=self.name,
-                data=self._create_safe_context(df, {
-                    'query': stored_query['query'],
-                    'threshold': params['threshold']
-                }),
-                metadata={
-                    'preview_id': preview_id,
-                    'original_id': params['query_id'],
-                    'analysis_prompts': [
-                        "Please analyze the changes in results after refinement:",
-                        "- Compare the number and quality of results",
-                        "- Assess if the new threshold improved relevance",
-                        "- Suggest if further refinement might help",
-                        "- Note that only refinement and dataset conversion are available actions"
-                    ]
-                }
-            ),
             store_updates=store_updates
         )
-    
-    def _create_safe_context(self, df: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a context-safe summary for the LLM."""
-        return {
-            'query': params['query'],
-            'threshold': params['threshold'],
-            'total_results': len(df),
-            'preview_summary': {
-                'result_count': len(df),
-                'score_range': {
-                    'min': df['score'].min(),
-                    'max': df['score'].max(),
-                    'mean': df['score'].mean()
-                },
-                'top_results': [  # Just basic info for top 5
-                    {
-                        'title': row.get('Article_title', 'Untitled'),
-                        'score': row['score']
-                    }
-                    for _, row in df.head(5).iterrows()
-                ]
-            }
-        } 

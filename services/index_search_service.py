@@ -37,12 +37,13 @@ Future Enhancements:
 from typing import Dict, Any, List, Optional, Set
 import re
 from datetime import datetime
+import pandas as pd
 
 from .base import (
     ChatService,
     ServiceResponse,
     ServiceMessage,
-    ServiceContext
+    PreviewIdentifier
 )
 
 class SearchParameters:
@@ -136,6 +137,9 @@ class IndexSearchService(ChatService):
             }
         """
         super().__init__("index_search")
+        # Register our prefix for search result IDs
+        PreviewIdentifier.register_prefix("search")
+        
         self.index_sources = index_sources
         
         # Single pattern for command-style syntax
@@ -157,11 +161,17 @@ class IndexSearchService(ChatService):
             search <source> indices for <text>
             search indices with threshold <0.X> for <text>
             search <source> indices with threshold <0.X> for <text>
+            convert search_<ID> to dataset
         """
         message = message.lower().strip()
-        match = re.match(self.command_pattern, message)
         
-        # Additional validation to ensure 'for' clause exists
+        # Check for dataset conversion command
+        if message.startswith('convert search_'):
+            convert_match = re.match(r'^convert\s+(search_\d{8}_\d{6}(?:_orig|_alt\d+))\s+to\s+dataset\b', message)
+            return bool(convert_match)
+            
+        # Check for search command
+        match = re.match(self.command_pattern, message)
         if match:
             _, _, query = match.groups()
             return bool(query and query.strip())
@@ -175,10 +185,20 @@ class IndexSearchService(ChatService):
             "search indices for example"
             "search database indices for test"
             "search dataset indices with threshold 0.8 for sample"
+            "convert search_20250212_123456_orig to dataset"
         """
         message = message.lower().strip()
-        match = re.match(self.command_pattern, message)
         
+        # Check for dataset conversion
+        convert_match = re.match(r'^convert\s+(search_\d{8}_\d{6}(?:_orig|_alt\d+))\s+to\s+dataset\b', message)
+        if convert_match:
+            return {
+                'command': 'convert',
+                'search_id': convert_match.group(1)
+            }
+        
+        # Must be a search command
+        match = re.match(self.command_pattern, message)
         if not match:
             raise ValueError("Message does not match expected command format")
             
@@ -209,13 +229,150 @@ class IndexSearchService(ChatService):
                 raise ValueError(f"Invalid threshold value: {str(e)}")
         
         return {
+            'command': 'search',
             'query': query.strip(),
             'threshold': threshold if threshold is not None else 0.6,  # Default threshold
             'sources': sources
         }
     
+    def _create_results_dataframe(self, results: List[Dict]) -> pd.DataFrame:
+        """Convert search results to a structured DataFrame.
+        
+        This creates a normalized view of results across different sources,
+        making it suitable for dataset conversion and analysis.
+        """
+        rows = []
+        for result in results:
+            for col_name, details in result['details'].items():
+                for matched_value in details['matches']:
+                    rows.append({
+                        'source_type': result['source_type'],
+                        'source_name': result['source_name'],
+                        'column_name': col_name,
+                        'matched_value': matched_value,
+                        'similarity': details['similarities'][matched_value],
+                        'occurrences': details['counts'][matched_value]
+                    })
+        
+        df = pd.DataFrame(rows)
+        
+        # Format columns
+        if not df.empty:
+            # Format similarity as percentage
+            df['similarity'] = df['similarity'].apply(lambda x: f"{x*100:.1f}%")
+            
+            # Sort by similarity (after converting to string)
+            df = df.sort_values(by=['source_type', 'source_name', 'similarity'], 
+                              ascending=[True, True, False])
+            
+            # Rename columns for better readability
+            df = df.rename(columns={
+                'source_type': 'Source Type',
+                'source_name': 'Source Name',
+                'column_name': 'Column',
+                'matched_value': 'Matched Value',
+                'similarity': 'Similarity',
+                'occurrences': 'Count'
+            })
+        
+        return df
+    
+    def _handle_dataset_conversion(self, params: dict, context: dict) -> ServiceResponse:
+        """Handle conversion of search results to dataset.
+        
+        Args:
+            params: Parameters including search_id
+            context: Execution context with search store
+            
+        Returns:
+            ServiceResponse with conversion result
+        """
+        search_id = params.get('search_id')
+        if not search_id:
+            return ServiceResponse(
+                messages=[ServiceMessage(
+                    service=self.name,
+                    content="No search ID provided for conversion.",
+                    message_type="error"
+                )],
+                state_updates={'chat_input': ''}
+            )
+        
+        # Get stored execution
+        executions = context.get('successful_queries_store', {})
+        stored = executions.get(search_id)
+        
+        if not stored:
+            return ServiceResponse(
+                messages=[ServiceMessage(
+                    service=self.name,
+                    content=f"No execution found for search ID: {search_id}",
+                    message_type="error"
+                )],
+                state_updates={'chat_input': ''}
+            )
+        
+        try:
+            # Create DataFrame from stored results
+            df = pd.DataFrame(stored['dataframe'])
+            
+            # Get datasets store
+            datasets = context.get('datasets_store', {})
+            
+            # Create dataset with special metadata
+            datasets[search_id] = {
+                'df': df.to_dict('records'),
+                'metadata': {
+                    'source': f"Search Query: {search_id}",
+                    'query': stored['query'],
+                    'threshold': stored['threshold'],
+                    'execution_time': stored['metadata']['execution_time'],
+                    'rows': len(df),
+                    'columns': list(df.columns),
+                    'sources': stored['metadata']['sources']
+                }
+            }
+            
+            return ServiceResponse(
+                messages=[ServiceMessage(
+                    service=self.name,
+                    content=f"""✓ Search results converted to dataset '{search_id}'
+
+- Rows: {len(df)}
+- Columns: {', '.join(df.columns)}
+- Source: Search Query {search_id}
+- Original query: {stored['query']}
+- Threshold: {stored['threshold']}
+- Sources: {', '.join(stored['metadata']['sources'])}""",
+                    message_type="info"
+                )],
+                store_updates={
+                    'datasets_store': datasets,  # Update datasets store
+                    'successful_queries_store': {  # Update queries store, removing the converted query
+                        k: v for k, v in executions.items() if k != search_id
+                    }
+                },
+                state_updates={'chat_input': ''}
+            )
+            
+        except Exception as e:
+            return ServiceResponse(
+                messages=[ServiceMessage(
+                    service=self.name,
+                    content=f"Index search service error: ❌ Search result conversion failed: {str(e)}",
+                    message_type="error"
+                )],
+                state_updates={'chat_input': ''}
+            )
+    
     def execute(self, params: dict, context: dict) -> ServiceResponse:
         """Execute the search request."""
+        command = params.get('command')
+        
+        if command == 'convert':
+            return self._handle_dataset_conversion(params, context)
+        
+        # Must be a search command
         query = params.get('query', '')
         threshold = params.get('threshold', 0.3)
         sources = params.get('sources', {'database', 'datasets'})
@@ -285,10 +442,37 @@ class IndexSearchService(ChatService):
         
         print(f"\nTotal results: {len(results)}")
         
-        # Create concise summary for LLM
+        # Generate unique ID for this search
+        search_id = PreviewIdentifier.create_id(prefix="search")
+        
+        # Create DataFrame from results for storage
+        results_df = self._create_results_dataframe(results)
+        
+        # Store in successful_queries_store
+        store_updates = {
+            'successful_queries_store': {
+                search_id: {
+                    'query': query,
+                    'threshold': threshold,
+                    'dataframe': results_df.to_dict('records'),
+                    'metadata': {
+                        'execution_time': datetime.now().isoformat(),
+                        'total_results': len(results),
+                        'sources': list(sources)
+                    }
+                }
+            }
+        }
+        
+        # Create concise summary for chat
         summary = []
         if results:
             summary.append(f"Found matches for '{query}' (threshold={threshold}):")
+            summary.append(f"\nSearch ID: {search_id}")
+            
+            # Add DataFrame preview
+            preview = f"\nResults preview:\n```\n{results_df.head().to_string()}\n```"
+            summary.append(preview)
             
             # Group by source type
             by_source = {'database': [], 'dataset': []}
@@ -316,6 +500,9 @@ class IndexSearchService(ChatService):
                         total_rows = sum(details['counts'].values())
                         dataset_summary.append(f"{col}: {match_count} unique matches ({total_rows} total rows)")
                     summary.append(f"- {result['source_name']}: {', '.join(dataset_summary)}")
+                    
+            # Add conversion hint
+            summary.append(f"\nTo convert results to a dataset, use: convert {search_id} to dataset")
         else:
             summary.append(f"No matches found for '{query}' with threshold {threshold}")
         
@@ -324,24 +511,6 @@ class IndexSearchService(ChatService):
             for warning in warnings:
                 summary.append(f"- {warning}")
         
-        # Create service context with proper structure
-        service_context = ServiceContext(
-            source="index_search",
-            data={
-                'query': query,
-                'threshold': threshold,
-                'results': results,
-                'warnings': warnings
-            },
-            metadata={
-                'total_matches': len(results),
-                'source_counts': {
-                    source_type: len(source_results)
-                    for source_type, source_results in by_source.items()
-                }
-            }
-        )
-        
         return ServiceResponse(
             messages=[
                 ServiceMessage(
@@ -349,60 +518,5 @@ class IndexSearchService(ChatService):
                     content="\n".join(summary)
                 )
             ],
-            context=service_context
-        )
-    
-    def _format_search_results(self, results: List[Dict], errors: List[str]) -> str:
-        """Format search results into a readable preview.
-        
-        Future:
-        - Add customizable formatting templates
-        - Add result grouping/clustering
-        - Add interactive result navigation
-        - Add source-specific formatting
-        """
-        if not results and not errors:
-            return "No matches found in any data source."
-        
-        sections = []
-        
-        # Add header with search coverage
-        sections.append("### Search Results")
-        
-        # Group results by source type
-        by_source = {}
-        for result in results:
-            source_type = result['source_type']
-            if source_type not in by_source:
-                by_source[source_type] = []
-            by_source[source_type].append(result)
-        
-        # Format results for each source type
-        for source_type, source_results in by_source.items():
-            sections.append(f"\n#### {source_type.title()} Matches")
-            
-            for result in source_results:
-                sections.append(f"\n{result['source_type']}: **{result['source_name']}** (Score: {result['similarity']:.2f})")
-                
-                for col_name, details in result['details'].items():
-                    matches = len(details['matches'])
-                    sections.append(f"\nColumn `{col_name}`: {matches} matching values")
-                    
-                    # Show matches sorted by similarity
-                    all_matches = sorted(
-                        details['matches'],
-                        key=lambda x: details['similarities'][x],
-                        reverse=True
-                    )
-                    for value in all_matches:
-                        count = details['counts'][value]
-                        similarity = details['similarities'][value]
-                        sections.append(f"- '{value}' ({count} occurrences, {similarity:.0f}% match)")
-        
-        # Add errors if any
-        if errors:
-            sections.append("\n### Search Errors")
-            for error in errors:
-                sections.append(f"- {error}")
-        
-        return "\n".join(sections) 
+            store_updates=store_updates
+        ) 
