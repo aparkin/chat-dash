@@ -7,6 +7,42 @@ It provides a modular interface for:
 2. Safe code execution for analysis
 3. Dataset creation from analysis results
 4. Dataset state management
+5. LLM-assisted analysis planning and summarization
+
+Architecture:
+- Exception Hierarchy:
+  - DatasetAnalysisException: Base exception for all dataset-related errors
+  - ValidationError: Raised when code validation fails
+  - ExecutionError: Raised when code execution fails
+  - SecurityError: Raised when code violates security constraints
+
+- Core Components:
+  - CodeValidator: Validates code blocks for safety and correctness
+  - CodeExecutor: Executes validated code blocks in a controlled environment
+  - DatasetService: Main service class handling all dataset operations
+
+- Command Types:
+  - info: Dataset information requests
+  - validate: Code block validation
+  - execute: Code execution
+  - convert: Dataset conversion
+  - analysis: Analysis generation
+
+- Code Generation:
+  The service uses a template-based approach for code generation with:
+  - Strict validation of code structure
+  - Safe execution environment
+  - Proper initialization of analysis function
+  - Result validation and type checking
+  - Visualization state management
+
+Dependencies:
+- pandas: Data manipulation and analysis
+- numpy: Numerical operations
+- plotly: Visualization
+- scipy.stats: Statistical functions
+- sklearn.preprocessing: Data preprocessing
+- ydata_profiling: Dataset profiling
 """
 
 from typing import Dict, Any, Optional, List, Tuple, Union
@@ -28,28 +64,80 @@ from .base import (
     ChatService, 
     ServiceResponse, 
     ServiceMessage, 
-    ServiceContext,
     PreviewIdentifier
 )
+from .llm_service import LLMServiceMixin
 
 class DatasetAnalysisException(Exception):
-    """Base exception for dataset analysis errors."""
+    """Base exception for dataset analysis errors.
+    
+    This is the parent class for all dataset service specific exceptions.
+    It provides a common base for catching and handling dataset-related errors.
+    """
     pass
 
 class ValidationError(DatasetAnalysisException):
-    """Raised when code validation fails."""
+    """Raised when code validation fails.
+    
+    This exception is raised when code fails to meet safety or structural requirements:
+    - Contains blocked operations
+    - Uses unauthorized imports
+    - Missing required components
+    - Invalid code structure
+    """
     pass
 
 class ExecutionError(DatasetAnalysisException):
-    """Raised when code execution fails."""
+    """Raised when code execution fails.
+    
+    This exception is raised when:
+    - Code execution fails in the controlled environment
+    - Required variables are not set
+    - Return values are missing or invalid
+    - Runtime errors occur during execution
+    """
     pass
 
 class SecurityError(DatasetAnalysisException):
-    """Raised when code violates security constraints."""
+    """Raised when code violates security constraints.
+    
+    This exception is raised when:
+    - Code attempts to access restricted operations
+    - Code tries to import unauthorized modules
+    - Code attempts to modify system state
+    - Code violates sandbox restrictions
+    """
     pass
 
 class CodeValidator:
-    """Validates code blocks for safety and correctness."""
+    """Validates code blocks for safety and correctness.
+    
+    This class provides a comprehensive validation framework for Python code blocks,
+    ensuring they meet safety and structural requirements before execution.
+    
+    Validation checks:
+    1. Safety:
+       - No blocked operations (eval, exec, etc.)
+       - Only allowed imports
+       - No file system or system operations
+    
+    2. Structure:
+       - Required variable initialization
+       - Proper function definition
+       - Return value format
+    
+    3. Output Format:
+       - result variable must be a dictionary
+       - viz_data must contain figure key
+    
+    Attributes:
+        allowed_imports (set[str]): Set of allowed module imports
+        blocked_ops (set[str]): Set of blocked operations
+        import_pattern (Pattern): Regex for import statements
+        blocked_pattern (Pattern): Regex for blocked operations
+        result_pattern (Pattern): Regex for result initialization
+        viz_data_pattern (Pattern): Regex for viz_data structure
+    """
     
     def __init__(self):
         # Allowed module imports
@@ -60,25 +148,43 @@ class CodeValidator:
         
         # Blocked operations/attributes
         self.blocked_ops = {
-            'eval', 'exec', 'compile',
-            'open', 'file', 'os', 'sys',
-            'subprocess', 'import', '__import__'
+            'eval', 'exec', 'compile',  # Code execution
+            'open', 'file', 'os', 'sys',  # File/system access
+            'subprocess', 'import', '__import__',  # System/import operations
+            'map'  # Blocked because it can be used for code execution
         }
         
         # Compile regex patterns
         self.import_pattern = re.compile(r'^(?:from|import)\s+([a-zA-Z0-9_.]+)')
         self.blocked_pattern = re.compile(
-            r'(?:' + '|'.join(map(re.escape, self.blocked_ops)) + r')\s*\('
+            r'(?:^|[^a-zA-Z0-9_.])'  # Start of line or non-identifier char
+            + r'(?:' + '|'.join(map(re.escape, self.blocked_ops)) + r')'  # Blocked operation
+            + r'\s*\('  # Opening parenthesis
         )
+        
+        # Output format validation patterns - Make more flexible
+        self.result_pattern = re.compile(r'(?:result\s*=\s*\{[^}]*\}|result\s*=\s*\{\}|result\[[\'"][^\]]+[\'"]\]\s*=)')
+        self.viz_data_pattern = re.compile(r'viz_data\s*=\s*\{[^}]*[\'"]figure[\'"]\s*:')
     
     def validate(self, code: str) -> Tuple[bool, Optional[str]]:
         """Validate code block for safety and correctness.
+        
+        Performs a series of validation checks on the provided code:
+        1. Checks for blocked operations
+        2. Validates imports
+        3. Verifies required output format
+        4. Checks code syntax
         
         Args:
             code: Python code to validate
             
         Returns:
             Tuple[bool, Optional[str]]: (is_valid, error_message)
+            - is_valid: True if code passes all validation checks
+            - error_message: None if valid, otherwise description of the error
+            
+        Raises:
+            None: All exceptions are caught and returned as error messages
         """
         try:
             # Check for blocked operations
@@ -92,6 +198,14 @@ class CodeValidator:
                     if module not in self.allowed_imports:
                         return False, f"Import of '{module}' not allowed"
             
+            # Check for required output format - result dictionary
+            if not self.result_pattern.search(code):
+                return False, "Code must initialize 'result' variable as a dictionary and populate it with DataFrames"
+                
+            # Check for required output format - viz_data
+            if not self.viz_data_pattern.search(code):
+                return False, "Code must set 'viz_data' with 'figure' key"
+            
             # Try to compile code to check syntax
             compile(code, '<string>', 'exec')
             
@@ -103,9 +217,36 @@ class CodeValidator:
             return False, f"Validation error: {str(e)}"
 
 class CodeExecutor:
-    """Executes validated code blocks safely."""
+    """Executes validated code blocks safely in a controlled environment.
+    
+    This class provides a secure execution environment for running user-provided
+    code blocks. It manages the execution context, provides necessary libraries,
+    and ensures proper isolation of the execution environment.
+    
+    Features:
+    1. Controlled Environment:
+       - Pre-imported trusted libraries
+       - Restricted global namespace
+       - Safe execution context
+    
+    2. Library Management:
+       - Core data libraries (pandas, numpy)
+       - Visualization libraries (plotly)
+       - Statistical libraries (scipy.stats)
+       - Preprocessing tools (sklearn)
+    
+    3. Result Validation:
+       - Type checking of return values
+       - Validation of result structure
+       - Proper error handling
+    
+    Attributes:
+        validator (CodeValidator): Code validation instance
+        globals (dict): Global namespace for code execution
+    """
     
     def __init__(self):
+        """Initialize the code executor with necessary libraries and validation."""
         self.validator = CodeValidator()
         
         # Initialize execution environment with all necessary libraries
@@ -140,56 +281,111 @@ class CodeExecutor:
         for func in ['mean', 'median', 'std', 'min', 'max', 'sum', 'abs', 'log', 'exp']:
             self.globals[func] = getattr(np, func)
     
-    def execute(self, code: str, df: pd.DataFrame) -> Tuple[Any, Dict[str, Any]]:
+    def execute(self, code: str, df: pd.DataFrame, datasets: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
         """Execute code safely in a controlled environment.
+        
+        This method:
+        1. Validates the code using CodeValidator
+        2. Sets up a clean execution environment
+        3. Executes the code safely
+        4. Validates and returns the results
         
         Args:
             code: Python code to execute
             df: DataFrame to make available to the code
+            datasets: Dictionary of datasets from store
             
         Returns:
             Tuple[Any, Dict[str, Any]]: (execution_result, metadata)
+            - execution_result: The result from the analyze_data function
+            - metadata: Dictionary containing execution metadata
+            
+        Raises:
+            ValidationError: If code fails validation
+            ExecutionError: If execution fails or returns invalid results
         """
         # First validate the code
         is_valid, error = self.validator.validate(code)
-        if not error:
+        if not is_valid:
+            raise ValidationError(f"Code validation failed: {error}")
+            
+        try:
             # Create a local namespace for execution
             local_vars = {
                 'df': df,
+                'datasets': datasets,
                 'result': None,
                 'viz_data': None
             }
             
+            # Execute the code to define the function
             try:
-                # Execute the code
                 exec(code, self.globals, local_vars)
-                
-                # Get the result (either explicitly set or last expression)
-                result = local_vars.get('result', None)
-                
-                # Collect metadata about the execution
-                metadata = {
-                    'execution_time': datetime.now().isoformat(),
-                    'code_size': len(code),
-                    'has_viz': 'viz_data' in local_vars and local_vars['viz_data'] is not None
-                }
-                
-                # If there's visualization data, include it in metadata
-                if metadata['has_viz']:
-                    metadata['viz_data'] = local_vars['viz_data']
-                
-                return result, metadata
-                
             except Exception as e:
-                raise ExecutionError(f"Code execution failed: {str(e)}")
-        else:
-            raise ValidationError(f"Code validation failed: {error}")
+                print("\nFunction definition error:")
+                print(f"Error type: {type(e).__name__}")
+                print(f"Error message: {str(e)}")
+                print("Traceback:")
+                print(traceback.format_exc())
+                raise ExecutionError(f"Error defining analyze_data function: {str(e)}")
+            
+            # Get the analyze_data function from the namespace
+            analyze_data = local_vars.get('analyze_data')
+            if not analyze_data:
+                raise ExecutionError("analyze_data function not found in code")
+            
+            # Execute the function and get results
+            try:
+                result, viz_data = analyze_data(datasets)
+            except Exception as e:
+                print("\nFunction execution error:")
+                print(f"Error type: {type(e).__name__}")
+                print(f"Error message: {str(e)}")
+                print("Traceback:")
+                print(traceback.format_exc())
+                
+                raise ExecutionError(f"Error executing analyze_data function: {str(e)}")
+            
+            # Verify we got both values
+            if result is None:
+                raise ExecutionError("analyze_data function did not return a result")
+            if viz_data is None:
+                raise ExecutionError("analyze_data function did not return viz_data")
+            
+            # Collect metadata about the execution
+            metadata = {
+                'execution_time': datetime.now().isoformat(),
+                'code_size': len(code),
+                'has_viz': bool(viz_data and isinstance(viz_data, dict) and 'figure' in viz_data)
+            }
+            
+            # If there's visualization data, include it in metadata
+            if metadata['has_viz']:
+                metadata['viz_data'] = viz_data
+            
+            return result, metadata
+                
+        except Exception as e:
+            print(f"\nExecution error details: {str(e)}")
+            print(f"Error type: {type(e).__name__}")
+            print(f"Local variables: {list(local_vars.keys())}")
+            if 'result' in local_vars:
+                print(f"Result type: {type(local_vars['result'])}")
+            if 'viz_data' in local_vars:
+                print(f"viz_data type: {type(local_vars['viz_data'])}")
+            if 'analyze_data' in local_vars:
+                print(f"analyze_data type: {type(local_vars['analyze_data'])}")
+            print("Traceback:")
+            print(traceback.format_exc())
+            raise ExecutionError(f"Code execution failed: {str(e)}")
 
-class DatasetService(ChatService):
+class DatasetService(ChatService, LLMServiceMixin):
     """Service for dataset analysis and code execution."""
     
     def __init__(self):
-        super().__init__("dataset")
+        ChatService.__init__(self, "dataset")
+        LLMServiceMixin.__init__(self, "dataset")
+        
         # Register our prefixes
         PreviewIdentifier.register_prefix("datasetCode")  # For code blocks
         PreviewIdentifier.register_prefix("dataset")      # For datasets
@@ -244,9 +440,12 @@ class DatasetService(ChatService):
     
     def parse_request(self, message: str) -> dict:
         """Parse dataset service request from message."""
-        # Normalize message
+        # Store original message for analysis descriptions
+        original_message = message.strip()
+        print(f"\nParsing dataset request: '{original_message}'")
+        # Use lowercase only for command detection
         message = message.lower().strip()
-        print(f"\nParsing dataset request: '{message}'")
+
         
         # Check for simple execution command first
         if message in ['run.', 'execute.', 'run!', 'execute!']:
@@ -297,19 +496,21 @@ class DatasetService(ChatService):
                 'target': analyze_match.group(1)
             }
             
-        # Check for analysis request
+        # Check for analysis request - use original message to preserve case
         analysis_match = re.match(r'^analysis:\s*(.+)$', message)
         if analysis_match:
+            # Get the description from the original message to preserve case
+            description_start = original_message.find(':') + 1
             return {
                 'command': 'analysis',
-                'description': analysis_match.group(1).strip()
+                'description': original_message[description_start:].strip()
             }
             
         # Check for Python code block
         if self.code_block_re.search(message):
             return {
                 'command': 'validate',
-                'code': message
+                'code': original_message  # Use original message to preserve case in code
             }
             
         return {}
@@ -437,7 +638,8 @@ class DatasetService(ChatService):
         if context.get('datasets_store') and context.get('selected_dataset'):
             def test_code_execution():
                 df = pd.DataFrame({'a': [1, 2, 3]})
-                result, metadata = self.executor.execute("result = df.describe()", df)
+                test_datasets = {'test': {'df': df.to_dict('records')}}
+                result, metadata = self.executor.execute("result = df.describe()", df, test_datasets)
                 assert isinstance(result, pd.DataFrame)
                 assert 'mean' in result.index
             
@@ -474,23 +676,13 @@ class DatasetService(ChatService):
                 service=self.name,
                 content="\n".join(summary),
                 message_type="info" if passed == total else "warning"
-            )],
-            context=ServiceContext(
-                source=self.name,
-                data={
-                    'test_results': {
-                        'passed': passed,
-                        'total': total,
-                        'details': test_results
-                    }
-                },
-                metadata={'test_timestamp': datetime.now().isoformat()}
-            )
+            )]
         )
 
     def _handle_info_request(self, params: dict, context: dict) -> ServiceResponse:
         """Handle dataset information requests."""
         datasets = context.get('datasets_store', {})
+
         if not datasets:
             return ServiceResponse(
                 messages=[ServiceMessage(
@@ -528,23 +720,6 @@ class DatasetService(ChatService):
                     f"- Columns: {len(df.columns)}"
                 ])
             
-            # Create focused context
-            service_context = ServiceContext(
-                source=self.name,
-                data={
-                    'datasets': {
-                        name: {
-                            'rows': len(pd.DataFrame(data['df'])),
-                            'columns': len(pd.DataFrame(data['df']).columns)
-                        }
-                        for name, data in datasets.items()
-                    }
-                },
-                metadata={
-                    'task': 'dataset_overview',
-                    'timestamp': datetime.now().isoformat()
-                }
-            )
             
             return ServiceResponse(
                 messages=[ServiceMessage(
@@ -553,7 +728,6 @@ class DatasetService(ChatService):
                     message_type="info",
                     role="assistant"
                 )],
-                context=service_context,
                 state_updates={'chat_input': ''}
             )
             
@@ -605,24 +779,6 @@ class DatasetService(ChatService):
                         f"- Std: {stats['std']:.2f}"
                     ])
             
-            # Create focused context
-            service_context = ServiceContext(
-                source=self.name,
-                data={
-                    'dataset_name': target,
-                    'analysis_summary': {
-                        'rows': len(df),
-                        'columns': len(df.columns),
-                        'numeric_cols': df.select_dtypes(include=[np.number]).columns.tolist(),
-                        'categorical_cols': df.select_dtypes(exclude=[np.number]).columns.tolist()
-                    }
-                },
-                metadata={
-                    'analysis_time': datetime.now().isoformat(),
-                    'analysis_type': 'dataset_overview'
-                }
-            )
-            
             return ServiceResponse(
                 messages=[ServiceMessage(
                     service=self.name,
@@ -630,7 +786,6 @@ class DatasetService(ChatService):
                     message_type="info",
                     role="assistant"
                 )],
-                context=service_context,
                 state_updates={'chat_input': ''}
             )
     
@@ -675,6 +830,7 @@ class DatasetService(ChatService):
     
     def _handle_code_execution(self, params: dict, context: dict) -> ServiceResponse:
         """Handle code execution requests."""
+        
         # Validate environment
         validation_result = self._validate_execution_environment(params, context)
         if not isinstance(validation_result, tuple):
@@ -683,11 +839,17 @@ class DatasetService(ChatService):
 
         try:
             # Execute code in isolated environment
-            result, metadata = self.executor.execute(code, df)
+            print("\nExecuting code...")
+            result, metadata = self.executor.execute(code, df, context['datasets_store'])
+            
+            print("\nExecution complete")
+            print("Result type:", type(result))
+            print("Has visualization:", metadata.get('has_viz', False))
             
             # Process results and build response components
             store_updates = {}
             state_updates = {'chat_input': ''}
+            messages = []
             
             # Handle visualization if present
             if metadata.get('has_viz') and metadata.get('viz_data'):
@@ -695,80 +857,72 @@ class DatasetService(ChatService):
                 if isinstance(viz_data, dict) and 'figure' in viz_data:
                     state_updates['active_tab'] = 'tab-viz'
                     state_updates['viz_state'] = self._process_visualization(viz_data, selected_dataset, df, context)
+                    if state_updates['viz_state']:
+                        messages.append(ServiceMessage(
+                            service=self.name,
+                            content="✓ Visualization created and available in visualization tab",
+                            message_type="info",
+                            role="assistant"
+                        ))
 
-            # Process results based on type
-            if isinstance(result, dict) and all(isinstance(v, (pd.DataFrame, type(None))) for v in result.values()):
-                # Handle multiple DataFrame results
-                result_ids, preview_text, context_data = self._process_multiple_results(result, code_id, selected_dataset, store_updates)
-                main_result_id = result_ids[0] if result_ids else None
-                
-                # Create service context
-                service_context = ServiceContext(
-                    source=self.name,
-                    data=context_data,
-                    metadata={
-                        'execution_time': datetime.now().isoformat(),
-                        'result_count': len(result),
-                        'analysis_prompts': [
-                            "Please analyze the results of the code execution:",
-                            "- Summarize what each DataFrame contains",
-                            "- Note any interesting patterns or relationships between the results",
-                            "- Suggest potential next steps for analysis"
-                        ]
-                    }
-                )
-            else:
-                # Handle single result (existing logic)
-                result_id, preview_text = self._process_result(result, code_id, selected_dataset, store_updates)
-                result_ids = [result_id]
-                main_result_id = result_id
-                
-                if isinstance(result, pd.DataFrame):
-                    result_data = result.to_dict('records')
-                elif isinstance(result, pd.Series):
-                    result_data = result.to_frame().to_dict('records')
-                else:
-                    result_data = {'value': str(result)}
-                
-                # Create service context
-                service_context = ServiceContext(
-                    source=self.name,
-                    data=result_data,
-                    metadata={
-                        'execution_time': datetime.now().isoformat(),
-                        'result_count': 1,
-                        'analysis_prompts': [
-                            "Please analyze the result of the code execution:",
-                            "- Summarize the result",
-                            "- Note any interesting patterns or insights"
-                        ]
-                    }
-                )
+            # Process results using new unified method
+            result_ids, preview_text = self._process_results(result, code_id, selected_dataset, store_updates)
+            main_result_id = result_ids[0] if result_ids else None
             
-            # Build response
-            response = self._build_execution_response(
-                preview_text,
-                main_result_id,
-                bool(state_updates.get('viz_state'))
-            )
-
-            return ServiceResponse(
-                messages=[ServiceMessage(
+            # Generate summary of results
+            summary = self.summarize(preview_text, context['chat_history'])
+            
+            # Build execution response
+            if preview_text:  # Only add result message if we have content
+                messages.extend([
+                    ServiceMessage(
+                        service=self.name,
+                        content=self._build_execution_response(
+                            preview_text,
+                            main_result_id,
+                            bool(state_updates.get('viz_state'))
+                        ),
+                        message_type="info",
+                        role="assistant"
+                    ),
+                    ServiceMessage(
+                        service=self.name,
+                        content=f"### Analysis Summary\n\n{summary}",
+                        message_type="info",
+                        role="assistant"
+                    )
+                ])
+            else:
+                # Add a default message if no preview text
+                messages.append(ServiceMessage(
                     service=self.name,
-                    content=response,
+                    content=self._build_execution_response(
+                        "Code executed successfully but produced no preview output.",
+                        main_result_id,
+                        bool(state_updates.get('viz_state'))
+                    ),
                     message_type="info",
                     role="assistant"
-                )],
-                context=service_context,
+                ))
+            
+            print("\nResponse built")
+            print("Number of messages:", len(messages))
+            print("Has visualization:", bool(state_updates.get('viz_state')))
+
+            return ServiceResponse(
+                messages=messages,
                 store_updates=store_updates,
                 state_updates=state_updates
             )
 
         except Exception as e:
+            print(f"\nError during execution: {str(e)}")
+            print(f"Error traceback: {traceback.format_exc()}")
+            error_msg = f"Dataset service error in code execution: {str(e)}"
             return ServiceResponse(
                 messages=[ServiceMessage(
                     service=self.name,
-                    content=f"Dataset service error in code execution: {str(e)}",
+                    content=error_msg,
                     message_type="error",
                     role="assistant"
                 )],
@@ -777,6 +931,9 @@ class DatasetService(ChatService):
 
     def _validate_execution_environment(self, params: dict, context: dict) -> Union[ServiceResponse, Tuple[pd.DataFrame, str, str, str]]:
         """Validate execution environment and extract required components."""
+        print("\n=== Debug: Validation Environment ===")
+        print(f"Validation parameters: {params}")
+        
         # Check for selected dataset
         selected_dataset = context.get('selected_dataset')
         datasets = context.get('datasets_store', {})
@@ -796,7 +953,7 @@ class DatasetService(ChatService):
             return ServiceResponse(
                 messages=[ServiceMessage(
                     service=self.name,
-                    content="No dataset is selected.",
+                    content="No dataset is selected. Please select a dataset from the list before running an analysis.",
                     message_type="error",
                     role="assistant"
                 )],
@@ -805,6 +962,7 @@ class DatasetService(ChatService):
         
         # Get code to execute
         code_id = params.get('code_id')
+        print(f"\nLooking for code with ID: {code_id}")
         code = self._find_code_block(context['chat_history'], code_id)
         
         if not code:
@@ -817,6 +975,10 @@ class DatasetService(ChatService):
                 )],
                 state_updates={'chat_input': ''}
             )
+        
+        print("\nFound code block:")
+        print("First 200 characters:")
+        print(code[:200])
         
         # Get dataset
         df = pd.DataFrame(datasets[selected_dataset]['df'])
@@ -834,6 +996,30 @@ class DatasetService(ChatService):
         if hasattr(figure, 'to_dict'):
             figure = figure.to_dict()
             
+        # Convert numpy arrays and pandas types to standard Python types
+        def convert_to_serializable(obj):
+            if isinstance(obj, (np.integer, np.floating)):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, pd.Int64Dtype):
+                return 'Int64'
+            elif isinstance(obj, pd.Series):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_to_serializable(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_to_serializable(i) for i in obj]
+            # Add handling for plotly Interval objects and other special types
+            elif hasattr(obj, 'to_plotly_json'):
+                return obj.to_plotly_json()
+            elif hasattr(obj, 'to_dict'):
+                return obj.to_dict()
+            return obj
+            
+        # Convert the entire figure
+        figure = convert_to_serializable(figure)
+            
         # Return state for direct visualization in the viz-container
         return {
             'figure': figure,  # This will be used directly by viz-container
@@ -846,16 +1032,72 @@ class DatasetService(ChatService):
             'view_settings': context.get('viz_state', {}).get('view_settings', {})
         }
 
-    def _process_result(self, result: Any, code_id: str, dataset_name: str, store_updates: dict) -> Tuple[str, str]:
-        """Process execution result and prepare preview."""
-        if isinstance(result, pd.DataFrame):
-            result_id = PreviewIdentifier.create_id(prefix="dataset")
-            preview = f"DataFrame Result ({len(result)} rows × {len(result.columns)} columns):\n"
-            preview += f"Dataset ID: {result_id}\n"
-            preview += f"```\n{result.head().to_string()}\n```"
+    def _process_results(self, result: Any, code_id: str, dataset_name: str, store_updates: dict) -> Tuple[List[str], str]:
+        """Process execution results and prepare preview.
+        
+        Handles both single and multiple results, providing consistent ID generation
+        and preview formatting.
+        
+        Args:
+            result: Single result or dictionary of results
+            code_id: ID of the code that generated the results
+            dataset_name: Name of the source dataset
+            store_updates: Dictionary to store updates for the successful queries store
             
-            store_updates['successful_queries_store'] = {
-                result_id: {
+        Returns:
+            Tuple[List[str], str]: (list of result IDs, formatted preview text)
+        """
+        result_ids = []
+        preview_parts = []
+        
+        # Initialize store if needed
+        store_updates['successful_queries_store'] = {}
+        
+        # Handle dictionary of results
+        if isinstance(result, dict) and all(isinstance(v, (pd.DataFrame, type(None))) for v in result.values()):
+            # Create first ID with prefix
+            previous_id = None
+            
+            for result_name, df in result.items():
+                if df is not None and isinstance(df, pd.DataFrame):
+                    # Generate ID based on whether we have a previous one
+                    if previous_id is None:
+                        result_id = PreviewIdentifier.create_id(prefix="dataset")
+                    else:
+                        result_id = PreviewIdentifier.create_id(previous_id=previous_id)
+                    previous_id = result_id
+                    result_ids.append(result_id)
+                    
+                    # Format preview
+                    preview_parts.append(f"\n**{result_name}** ({len(df)} rows × {len(df.columns)} columns)")
+                    preview_parts.append(f"Dataset ID: {result_id}")
+                    preview_parts.append(f"```\n{df.head().to_string()}\n```")
+                    
+                    # Store result
+                    store_updates['successful_queries_store'][result_id] = {
+                        'type': 'dataframe',
+                        'code_id': code_id,
+                        'dataframe': df.to_dict('records'),
+                        'metadata': {
+                            'source_dataset': dataset_name,
+                            'result_type': result_name,
+                            'execution_time': datetime.now().isoformat(),
+                            'rows': len(df),
+                            'columns': list(df.columns)
+                        }
+                    }
+        
+        # Handle single result
+        else:
+            result_id = PreviewIdentifier.create_id(prefix="dataset")
+            result_ids.append(result_id)
+            
+            if isinstance(result, pd.DataFrame):
+                preview_parts.append(f"DataFrame Result ({len(result)} rows × {len(result.columns)} columns)")
+                preview_parts.append(f"Dataset ID: {result_id}")
+                preview_parts.append(f"```\n{result.head().to_string()}\n```")
+                
+                store_updates['successful_queries_store'][result_id] = {
                     'type': 'dataframe',
                     'code_id': code_id,
                     'dataframe': result.to_dict('records'),
@@ -866,15 +1108,13 @@ class DatasetService(ChatService):
                         'columns': list(result.columns)
                     }
                 }
-            }
-        elif isinstance(result, pd.Series):
-            result_id = PreviewIdentifier.create_id(prefix="dataset")
-            preview = f"Series Result ({len(result)} elements):\n"
-            preview += f"Dataset ID: {result_id}\n"
-            preview += f"```\n{result.head().to_string()}\n```"
-            
-            store_updates['successful_queries_store'] = {
-                result_id: {
+                
+            elif isinstance(result, pd.Series):
+                preview_parts.append(f"Series Result ({len(result)} elements)")
+                preview_parts.append(f"Dataset ID: {result_id}")
+                preview_parts.append(f"```\n{result.head().to_string()}\n```")
+                
+                store_updates['successful_queries_store'][result_id] = {
                     'type': 'series',
                     'code_id': code_id,
                     'dataframe': result.to_frame().to_dict('records'),
@@ -885,13 +1125,13 @@ class DatasetService(ChatService):
                         'name': result.name or 'value'
                     }
                 }
-            }
-        else:
-            result_id = PreviewIdentifier.create_id(prefix="dataset")
-            preview = f"Result:\n```\n{str(result)[:1000]}\n```"
-            
-            store_updates['successful_queries_store'] = {
-                result_id: {
+                
+            else:
+                preview_parts.append(f"Result:")
+                preview_parts.append(f"Dataset ID: {result_id}")
+                preview_parts.append(f"```\n{str(result)[:1000]}\n```")
+                
+                store_updates['successful_queries_store'][result_id] = {
                     'type': 'other',
                     'code_id': code_id,
                     'result': str(result),
@@ -901,9 +1141,8 @@ class DatasetService(ChatService):
                         'result_type': type(result).__name__
                     }
                 }
-            }
-            
-        return result_id, preview
+        
+        return result_ids, "\n".join(preview_parts)
 
     def _build_execution_response(self, result_preview: str, result_id: str, has_viz: bool) -> str:
         """Build consistent execution response message."""
@@ -935,18 +1174,18 @@ class DatasetService(ChatService):
         Returns:
             The code block if found, None otherwise
         """
-        print("\n=== Debug: Finding Code Block ===")
-        print(f"Requested code_id: {code_id}")
-        print(f"Chat history length: {len(chat_history)}")
+        
+        most_recent_block = None
+        most_recent_id = None
         
         for msg in reversed(chat_history):
             if msg['role'] == 'assistant' and '```python' in msg['content'].lower():
-                print("\nFound message with Python block")
+                
                 for block, _, _ in self.detect_content_blocks(msg['content']):
                     lines = block.split('\n')
                     if not lines:
                         continue
-                        
+                    
                     # Look for the Code ID in the first line
                     first_line = lines[0].strip()
                     print(f"Checking first line: {first_line}")
@@ -955,16 +1194,33 @@ class DatasetService(ChatService):
                     if first_line.startswith('# Code ID:'):
                         found_id = first_line.replace('# Code ID:', '').strip()
                         print(f"Found code block with ID: {found_id}")
+                        
+                        # Store the most recent block we've seen
+                        if most_recent_block is None:
+                            most_recent_block = block
+                            most_recent_id = found_id
+                            print("Storing as most recent block")
+                        
                         if code_id:
                             if found_id.lower() == code_id.lower():  # Case-insensitive comparison
                                 print(f"Matched requested ID: {code_id}")
+                                print("Block content preview:")
+                                print(block[:200])
                                 return block
-                        else:
-                            # For run., return the first (most recent) block found
-                            print("No specific ID requested, returning this block")
-                            return block
+                        
+                # If we've found a message with Python blocks but haven't returned,
+                # and we're looking for the most recent block, return what we found
+                if not code_id and most_recent_block:
+                    print("\nNo specific ID requested, returning most recent block:")
+                    print(f"ID: {most_recent_id}")
+                    print("Block content preview:")
+                    print(most_recent_block[:200])
+                    return most_recent_block
                             
-        print("No matching code block found")
+        if code_id:
+            print(f"No matching code block found for ID: {code_id}")
+        else:
+            print("No Python code blocks found in recent history")
         return None
 
     def _handle_dataset_conversion(self, params: dict, context: dict) -> ServiceResponse:
@@ -1000,9 +1256,6 @@ class DatasetService(ChatService):
                 )],
                 state_updates={'chat_input': ''}
             )
-        
-        print("Found stored execution data")
-        print(f"Stored data keys: {list(stored.keys())}")
         
         try:
             # Convert result to DataFrame
@@ -1056,12 +1309,6 @@ class DatasetService(ChatService):
                 'profile_report': profile_html
             }
             
-            print(f"Dataset created with ID: {dataset_id}")
-            print("Dataset structure:")
-            print(f"- Has df: {bool(datasets[dataset_id]['df'])}")
-            print(f"- Has metadata: {bool(datasets[dataset_id]['metadata'])}")
-            print(f"- Has profile: {bool(datasets[dataset_id]['profile_report'])}")
-            
             response = ServiceResponse(
                 messages=[ServiceMessage(
                     service=self.name,
@@ -1083,11 +1330,6 @@ class DatasetService(ChatService):
                 state_updates={'chat_input': ''}
             )
             
-            print("\nCreated response:")
-            print(f"- Has messages: {bool(response.messages)}")
-            print(f"- Store updates: {list(response.store_updates.keys())}")
-            print(f"- State updates: {list(response.state_updates.keys())}")
-            
             return response
             
         except Exception as e:
@@ -1103,8 +1345,270 @@ class DatasetService(ChatService):
                 state_updates={'chat_input': ''}
             )
 
+    def _get_test_analysis_code(self, code_id: str, selected_dataset: str) -> str:
+        """Get the standard test analysis code template.
+        This is our reference implementation that demonstrates the expected format.
+        """
+        return f'''# Code ID: {code_id}
+# Analysis for dataset: {selected_dataset}
+
+def analyze_data(datasets):
+    """Analyze dataset and generate summary statistics with visualizations."""
+    # Load the data
+    df = pd.DataFrame(datasets['{selected_dataset}']['df'])
+    
+    # Create summary statistics
+    summary_df = df.describe(include='all').reset_index()
+    summary_df.columns.name = None
+    summary_df = summary_df.rename(columns={{'index': 'statistic'}})
+
+    # Create correlation matrix for numeric columns
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    if len(numeric_cols) >= 2:
+        corr_matrix = df[numeric_cols].corr()
+        # Store correlation matrix as a separate result
+        correlation_df = corr_matrix.reset_index()
+        correlation_df.columns.name = None
+        correlation_df = correlation_df.rename(columns={{'index': 'variable'}})
+    else:
+        correlation_df = None
+
+    # Create visualization
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=(
+            'Numeric Column Distribution',
+            'Correlation Heatmap',
+            'Box Plots',
+            'Missing Values'
+        ),
+        specs=[[{{'type': 'histogram'}}, {{'type': 'heatmap'}}],
+               [{{'type': 'box'}}, {{'type': 'bar'}}]]
+    )
+
+    # 1. Numeric Column Distribution (top left)
+    if len(numeric_cols) > 0:
+        for i, col in enumerate(numeric_cols[:3]):  # Show up to 3 columns
+            fig.add_trace(
+                go.Histogram(x=df[col], name=col, opacity=0.7),
+                row=1, col=1
+            )
+
+    # 2. Correlation Heatmap (top right)
+    if len(numeric_cols) >= 2:
+        fig.add_trace(
+            go.Heatmap(
+                z=corr_matrix.values,
+                x=corr_matrix.columns,
+                y=corr_matrix.index,
+                colorscale='RdBu',
+                zmid=0
+            ),
+            row=1, col=2
+        )
+
+    # 3. Box Plots (bottom left)
+    if len(numeric_cols) > 0:
+        for i, col in enumerate(numeric_cols[:3]):  # Show up to 3 columns
+            fig.add_trace(
+                go.Box(y=df[col], name=col),
+                row=2, col=1
+            )
+
+    # 4. Missing Values Bar Chart (bottom right)
+    missing_data = df.isnull().sum()
+    if missing_data.any():
+        fig.add_trace(
+            go.Bar(
+                x=missing_data.index,
+                y=missing_data.values,
+                name='Missing Values'
+            ),
+            row=2, col=2
+        )
+
+    # Update layout
+    fig.update_layout(
+        showlegend=True,
+        title_text=f'Analysis of {selected_dataset}',
+        title_x=0.5,
+        paper_bgcolor='white',
+        plot_bgcolor='white'
+    )
+
+    # Store results
+    result = {{
+        'summary': summary_df,
+        'correlation': correlation_df
+    }}
+
+    # Store visualization
+    viz_data = {{
+        'type': 'plotly',
+        'figure': fig.to_dict()
+    }}
+    
+    return result, viz_data
+
+# Execute analysis
+result, viz_data = analyze_data(datasets)'''
+
+    def process_message(self, message: str, chat_history: List[Dict[str, Any]], context: Dict[str, Any] = None) -> str:
+        """Process a message using the service's LLM for code generation.
+        
+        This is the central method for LLM-based code generation, used by _handle_analysis_request
+        and other methods that need to generate code through the LLM.
+        
+        Args:
+            message: The user's message to process
+            chat_history: List of previous chat messages
+            context: Optional dictionary containing additional context like selected dataset
+            
+        Returns:
+            str: The LLM's response containing generated code
+        """
+        print("\n=== Analysis Generation Debug ===")
+        
+        # Get datasets store from chat history context
+        datasets_store = {}
+        for msg in reversed(chat_history):
+            if msg.get('store_updates', {}).get('datasets_store'):
+                datasets_store = msg['store_updates']['datasets_store']
+                break
+        
+        print(f"Found datasets: {list(datasets_store.keys())}")
+        
+        # Get selected dataset from context or None if not available
+        selected_dataset = context.get('selected_dataset') if context else None
+        
+        # Prepare context with dataset information and get token limits
+        system_prompt, context_messages, limits = self._prepare_llm_context(
+            message, chat_history, datasets_store, selected_dataset
+        )
+        
+        print(f"Token limits: {limits}")
+        
+        # Add the current message
+        context_messages.append({
+            "role": "user",
+            "content": message
+        })
+        
+        # Initialize validation state
+        max_retries = 2
+        retry_count = 0
+        validation_history = []
+        
+        while retry_count < max_retries:
+            try:
+                print(f"\nAttempt {retry_count + 1} of {max_retries}")
+                
+                # Get LLM response
+                response = self._call_llm(context_messages, system_prompt)
+                print("\nGot LLM response, length:", len(response))
+                
+                # Generate a proper code ID before adding to blocks
+                code_id = PreviewIdentifier.create_id(prefix="datasetCode")
+                print(f"Generated code ID: {code_id}")
+                
+                # Replace template ID placeholder with actual ID
+                response = response.replace("{ID}", code_id)
+                
+                # Add proper code IDs to any additional code blocks
+                response = self.add_ids_to_blocks(response)
+                
+                # Extract code blocks
+                code_blocks = self.detect_content_blocks(response)
+                if not code_blocks:
+                    raise ValueError("Response must include Python code block")
+                
+                print(f"Found {len(code_blocks)} code blocks")
+                
+                # Process each code block
+                for code, _, _ in code_blocks:
+                    print("\nValidating code block:")
+                    print("First 200 characters:")
+                    print(code[:200])
+                    print("\nLast 200 characters:")
+                    print(code[-200:])
+                    
+                    # Check code size
+                    code_tokens = self.count_tokens(code)
+                    print(f"Code tokens: {code_tokens}/{limits['code_output']}")
+                    if code_tokens > limits['code_output']:
+                        raise ValueError(f"Code too long ({code_tokens} tokens)")
+                    
+                    # Validate the code structure
+                    is_valid_structure, structure_error = self._validate_code_structure(code)
+                    if not is_valid_structure:
+                        raise ValueError(f"Code structure validation failed: {structure_error}")
+                    
+                    # Validate the code safety
+                    is_valid, error = self.executor.validator.validate(code)
+                    if not is_valid:
+                        raise ValueError(f"Code validation failed: {error}")
+                    
+                    # Verify proper dataset access pattern
+                    if "df = " in code and "datasets[" not in code:
+                        raise ValueError("Code must use datasets dictionary to access data")
+                    print("Dataset access pattern validation passed")
+                
+                # If we get here, all validation passed
+                print("\nAll validations passed, returning response")
+                return response
+                
+            except ValueError as e:
+                error_msg = str(e)
+                print(f"\nValidation error: {error_msg}")
+                
+                # Check if we've seen this error before
+                if error_msg in validation_history:
+                    retry_count += 1  # Increment retry count for repeated errors
+                validation_history.append(error_msg)
+                
+                # Add the failed response and error to context
+                if len(context_messages) > 3:  # Keep context size manageable
+                    context_messages = context_messages[:3] + context_messages[-2:]
+                    
+                context_messages.extend([
+                    {"role": "assistant", "content": response},
+                    {"role": "user", "content": f"Error: {error_msg}. Please fix and try again."}
+                ])
+                
+                retry_count += 1
+                if retry_count >= max_retries:
+                    print("\nFailed to generate valid code after maximum retries")
+                    print("Last error:", error_msg)
+                    print("\nLast generated code:")
+                    for code, _, _ in code_blocks:
+                        print("\n--- Code Block ---")
+                        print(code)
+                        print("------------------")
+                    return f"""Failed to generate valid code after {max_retries} attempts.
+Last error: {error_msg}
+Please try rephrasing your request or simplifying the analysis."""
+                    
+            except Exception as e:
+                print(f"\nUnexpected error: {str(e)}")
+                print("Traceback:")
+                print(traceback.format_exc())
+                print("\nLast generated code:")
+                if 'code_blocks' in locals():
+                    for code, _, _ in code_blocks:
+                        print("\n--- Code Block ---")
+                        print(code)
+                        print("------------------")
+                return f"Unexpected error in code generation: {str(e)}"
+        
+        return response
+
     def _handle_analysis_request(self, params: dict, context: dict) -> ServiceResponse:
-        """Handle analysis requests with code generation."""
+        """Handle analysis requests with code generation.
+        
+        This method supports two paths:
+        1. "analysis: test" - Uses our reference implementation with a standard template
+        2. "analysis: {description}" - Uses LLM to generate custom analysis with full context
+        """
         # Validate dataset selection
         selected_dataset = context.get('selected_dataset')
         datasets = context.get('datasets_store', {})
@@ -1113,251 +1617,646 @@ class DatasetService(ChatService):
             return ServiceResponse(
                 messages=[ServiceMessage(
                     service=self.name,
-                    content="No dataset is selected.",
+                    content="No dataset is selected. Please select a dataset from the list before running an analysis.",
                     message_type="error",
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
             )
+        
+        try:
+            # Get analysis description
+            description = params.get('description', '').strip()
+            print(f"\nAnalysis description: '{description}'")
+            print(f"Length: {len(description)}")
+            print(f"Is test? {description.lower() == 'test'}")
             
-        # Get dataset info
-        df = pd.DataFrame(datasets[selected_dataset]['df'])
-        numeric_cols = df.select_dtypes(include=[np.number]).columns
-        categorical_cols = df.select_dtypes(exclude=[np.number]).columns
+            if not description:
+                return ServiceResponse(
+                    messages=[ServiceMessage(
+                        service=self.name,
+                        content="Please provide an analysis description.",
+                        message_type="error",
+                        role="assistant"
+                    )],
+                    state_updates={'chat_input': ''}
+                )
+            
+            # Get dataset info for context
+            df = pd.DataFrame(datasets[selected_dataset]['df'])
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            categorical_cols = df.select_dtypes(exclude=[np.number]).columns
+            
+            # Generate code ID
+            code_id = PreviewIdentifier.create_id(prefix="datasetCode")
+            
+            # Check if this is a test request
+            if description.lower() == 'test':
+                print("\nUsing test analysis code")
+                analysis_code = self._get_test_analysis_code(code_id, selected_dataset)
+                # Create a standard template response for test analysis
+                response_parts = [
+                    f"### Analysis Plan for Dataset: {selected_dataset}",
+                    "\n**Dataset Overview:**",
+                    f"- Rows: {len(df)}",
+                    f"- Columns: {len(df.columns)}",
+                    f"- Numeric columns: {len(numeric_cols)}",
+                    f"- Categorical columns: {len(categorical_cols)}",
+                    "\n**Generated Analysis Code:**",
+                    "```python",
+                    analysis_code,
+                    "```",
+                    "\n**Expected Results:**",
+                    "1. Summary statistics for all columns",
+                    "2. Correlation matrix for numeric columns",
+                    "3. Visualizations showing distributions and relationships",
+                    "\n**To Execute:**",
+                    "Run the analysis by typing 'run.' in the chat."
+                ]
+                response_content = "\n".join(response_parts)
+            else:
+                print("\nGenerating custom analysis code")
+                try:
+                    # Use process_message for LLM code generation
+                    print("\nCalling LLM for code generation...")
+                    response = self.process_message(
+                        f"Please generate analysis code for: {description}",
+                        context['chat_history'],
+                        context
+                    )
+                    print("\nLLM Response received, length:", len(response))
+                    
+                    # Validate that response contains code block
+                    code_blocks = self.detect_content_blocks(response)
+                    if not code_blocks:
+                        print("\nNo code blocks found in response:")
+                        print(response)
+                        raise ValueError("No code block found in LLM response")
+                    
+                    print(f"\nFound {len(code_blocks)} code blocks")
+                    for i, (code, _, _) in enumerate(code_blocks):
+                        print(f"\nCode Block {i+1}:")
+                        print(code)
+                    
+                    # Keep the full LLM response as it contains valuable context
+                    response_content = response
+                        
+                except Exception as e:
+                    print(f"\nLLM code generation failed: {str(e)}")
+                    print("\nFailed code generation attempt:")
+                    if 'response' in locals():
+                        print("\nComplete LLM Response:")
+                        print("-------------------")
+                        print(response)
+                        print("-------------------")
+                        if 'code_blocks' in locals() and code_blocks:
+                            print("\nExtracted code blocks")
+                        else:
+                            print("No code blocks were extracted from the response")
+                    else:
+                        print("No response was received from LLM")
+                    print("\nError traceback:")
+                    print(traceback.format_exc())
+                    print("\nFalling back to test analysis")
+                    
+                    # Fall back to test analysis with standard template
+                    analysis_code = self._get_test_analysis_code(code_id, selected_dataset)
+                    response_parts = [
+                        f"### Analysis Plan for Dataset: {selected_dataset}",
+                        "\n**Note:** Custom analysis generation failed, falling back to standard analysis.",
+                        f"\nError: {str(e)}",
+                        "\nFailed code generation attempt:",
+                        "```",
+                        "Complete LLM Response:" if 'response' in locals() else "No response received",
+                        response if 'response' in locals() else "",
+                        "```",
+                        "\n**Dataset Overview:**",
+                        f"- Rows: {len(df)}",
+                        f"- Columns: {len(df.columns)}",
+                        f"- Numeric columns: {len(numeric_cols)}",
+                        f"- Categorical columns: {len(categorical_cols)}",
+                        "\n**Generated Analysis Code:**",
+                        "```python",
+                        analysis_code,
+                        "```",
+                        "\n**Expected Results:**",
+                        "1. Summary statistics for all columns",
+                        "2. Correlation matrix for numeric columns",
+                        "3. Visualizations showing distributions and relationships",
+                        "\n**To Execute:**",
+                        "Run the analysis by typing 'run.' in the chat."
+                    ]
+                    response_content = "\n".join(response_parts)
+                    print("#######\n", response_content, "\n#######")
+            
+            return ServiceResponse(
+                messages=[ServiceMessage(
+                    service=self.name,
+                    content=response_content.strip(),
+                    message_type="info",
+                    role="assistant"
+                )],
+                state_updates={'chat_input': ''}
+            )
+            
+        except Exception as e:
+            return ServiceResponse(
+                messages=[ServiceMessage(
+                    service=self.name,
+                    content=f"Error generating analysis code: {str(e)}",
+                    message_type="error",
+                    role="assistant"
+                )],
+                state_updates={'chat_input': ''}
+            )
+
+    def _calculate_context_limits(self, system_prompt: str) -> Dict[str, int]:
+        """Calculate safe token limits for different components.
         
-        # Generate code ID
-        code_id = PreviewIdentifier.create_id(prefix="datasetCode")
+        Manages both input context window and expected output size to ensure:
+        1. Input (prompt + history + message) stays within model limits
+        2. Output can be used in future context
+        3. Space available for validation iterations
         
-        # Create analysis code with embedded ID
-        analysis_code = f"""# Code ID: {code_id}
-# Analysis for dataset: {selected_dataset}
-import plotly.express as px
-from plotly.subplots import make_subplots
-import plotly.graph_objects as go
+        Args:
+            system_prompt: The base system prompt
+            
+        Returns:
+            Dict with token limits for different components
+        """
+        # Model context window
+        MAX_CONTEXT_TOKENS = 8192
+        
+        # Calculate system prompt tokens (includes template, requirements)
+        system_tokens = self.count_tokens(system_prompt)
+        
+        # Token allocations
+        allocations = {
+            'system_prompt': system_tokens,
+            'current_message': 1000,    # Increased for user message
+            'validation_exchange': 1500,  # Increased for validation
+            'code_output': 3000,       # Increased for code generation
+            'safety_margin': 1000       # Increased safety margin
+        }
+        
+        # Calculate remaining space for history
+        total_reserved = sum(allocations.values())
+        available_for_history = MAX_CONTEXT_TOKENS - total_reserved
+        
+        # Update allocations with history limit
+        allocations['history'] = max(0, available_for_history)
+        
+        # Add total and remaining for reference
+        allocations['total_available'] = MAX_CONTEXT_TOKENS
+        allocations['remaining'] = MAX_CONTEXT_TOKENS - total_reserved
+        
+        return allocations
+
+    def _filter_history_by_tokens(self, chat_history: List[Dict[str, Any]], max_tokens: int) -> List[Dict[str, Any]]:
+        """Filter chat history to fit within token limit while preserving context.
+        
+        Prioritizes:
+        1. Most recent messages
+        2. Messages from this service
+        3. Messages with code blocks
+        
+        Args:
+            chat_history: Full chat history
+            max_tokens: Maximum tokens to use
+            
+        Returns:
+            Filtered chat history
+        """
+        filtered_messages = []
+        token_count = 0
+        
+        # First pass: get recent service messages and code blocks
+        for msg in reversed(chat_history):
+            msg_tokens = self.count_tokens(msg.get('content', ''))
+            
+            # Check if message contains code
+            has_code = '```python' in msg.get('content', '').lower()
+            is_service_msg = msg.get('service') == self.name
+            
+            # Prioritize messages with code or from our service
+            if (has_code or is_service_msg) and token_count + msg_tokens <= max_tokens:
+                filtered_messages.insert(0, msg)
+                token_count += msg_tokens
+        
+        # Second pass: add other recent context if space remains
+        remaining_tokens = max_tokens - token_count
+        if remaining_tokens > 0:
+            for msg in reversed(chat_history):
+                if msg not in filtered_messages:  # Skip already included messages
+                    msg_tokens = self.count_tokens(msg.get('content', ''))
+                    if token_count + msg_tokens <= max_tokens:
+                        filtered_messages.insert(0, msg)
+                        token_count += msg_tokens
+        
+        return filtered_messages
+
+    CODE_TEMPLATE = '''# The line below MUST remain exactly as is - do not modify the ID placeholder
+# Code ID: {ID}
+
+# Import statements - DO NOT move these inside the function
+import pandas as pd
 import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import scipy.stats as stats
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
-# Create summary statistics
-summary_df = df.describe(include='all').reset_index()
-summary_df.columns.name = None
-summary_df = summary_df.rename(columns={{'index': 'statistic'}})
-
-# Create correlation matrix for numeric columns
-numeric_cols = df.select_dtypes(include=[np.number]).columns
-if len(numeric_cols) >= 2:
-    corr_matrix = df[numeric_cols].corr()
-    # Store correlation matrix as a separate result
-    correlation_df = corr_matrix.reset_index()
-    correlation_df.columns.name = None
-    correlation_df = correlation_df.rename(columns={{'index': 'variable'}})
-else:
-    correlation_df = None
-
-# Create visualization
-fig = make_subplots(
-    rows=2, cols=2,
-    subplot_titles=(
-        'Numeric Column Distribution',
-        'Correlation Heatmap',
-        'Box Plots',
-        'Missing Values'
-    ),
-    specs=[[{{'type': 'histogram'}}, {{'type': 'heatmap'}}],
-           [{{'type': 'box'}}, {{'type': 'bar'}}]]
-)
-
-# 1. Numeric Column Distribution (top left)
-if len(numeric_cols) > 0:
-    for i, col in enumerate(numeric_cols[:3]):  # Show up to 3 columns
-        fig.add_trace(
-            go.Histogram(x=df[col], name=col, opacity=0.7),
-            row=1, col=1
-        )
-
-# 2. Correlation Heatmap (top right)
-if len(numeric_cols) >= 2:
-    fig.add_trace(
-        go.Heatmap(
-            z=corr_matrix.values,
-            x=corr_matrix.columns,
-            y=corr_matrix.index,
-            colorscale='RdBu',
-            zmid=0
-        ),
-        row=1, col=2
-    )
-
-# 3. Box Plots (bottom left)
-if len(numeric_cols) > 0:
-    for i, col in enumerate(numeric_cols[:3]):  # Show up to 3 columns
-        fig.add_trace(
-            go.Box(y=df[col], name=col),
-            row=2, col=1
-        )
-
-# 4. Missing Values Bar Chart (bottom right)
-missing_data = df.isnull().sum()
-if missing_data.any():
-    fig.add_trace(
-        go.Bar(
-            x=missing_data.index,
-            y=missing_data.values,
-            name='Missing Values'
-        ),
-        row=2, col=2
-    )
-
-# Update layout
-fig.update_layout(
-    showlegend=True,
-    title_text=f'Analysis of {selected_dataset}',
-    title_x=0.5,
-    paper_bgcolor='white',
-    plot_bgcolor='white'
-)
-
-# Store visualization
-viz_data = {{
-    'type': 'plotly',
-    'figure': fig.to_dict()
-}}
-
-# Return both DataFrames in a dictionary
-result = {{
-    'summary': summary_df,
-    'correlation': correlation_df
-}}
-"""
+def analyze_data(datasets):
+    """Analyze datasets and return results with visualization.
+    
+    Args:
+        datasets: Dictionary of datasets from store
         
-        # Build response with clear sections
-        response_parts = [
-            f"### Analysis Plan for Dataset: {selected_dataset}",
-            "\n**Dataset Overview:**",
-            f"- Rows: {len(df)}",
-            f"- Columns: {len(df.columns)}",
-            f"- Numeric columns: {len(numeric_cols)}",
-            f"- Categorical columns: {len(categorical_cols)}",
-            "\n**Generated Analysis Code:**",
-            "```python",
-            analysis_code,
-            "```",
-            "\n**To Execute:**",
-            "Run the analysis by typing 'run.' in the chat."
+    Returns:
+        tuple: (result_dict, viz_dict) where:
+            - result_dict: Dict[str, pd.DataFrame] containing analysis results
+            - viz_dict: Dict with 'figure' key containing Plotly figure
+    """
+    # Analysis implementation
+    {implementation}
+    
+    # Ensure results are in correct format
+    if not isinstance(result, dict) or not all(isinstance(df, pd.DataFrame) for df in result.values()):
+        raise ValueError("Result must be a dictionary of DataFrames")
+    if not isinstance(viz_data, dict) or 'figure' not in viz_data:
+        raise ValueError("viz_data must be a dictionary with 'figure' key")
+    
+    return result, viz_data
+
+# Execute analysis
+result, viz_data = analyze_data(datasets)'''
+
+    def _prepare_llm_context(self, message: str, chat_history: List[Dict[str, Any]], datasets_store: Dict, selected_dataset: str) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
+        """Prepare context for LLM including dataset information and validation history."""
+        print("\n=== Preparing LLM Context ===")
+        print(f"Selected dataset: {selected_dataset}")
+        
+        # Build rich dataset context
+        dataset_info = self._build_dataset_context(datasets_store)
+        print(f"Built dataset context")
+
+        # Get validation history from recent messages
+        validation_history = []
+        for msg in reversed(chat_history[-10:]):
+            if msg.get('service') == self.name and msg.get('message_type') == 'error':
+                if 'validation failed' in msg.get('content', '').lower():
+                    validation_history.append(msg['content'])
+        
+        print(f"Found {len(validation_history)} validation errors in history")
+        
+        # Create system prompt with context
+        system_prompt = f"""You are a data analysis code generator that creates Python code for dataset analysis.
+
+ANALYSIS REQUEST: [This is the primary user request that you must fulfill]
+{message}
+
+TARGET DATASET: '{selected_dataset}'
+
+DATASET INFORMATION:
+{dataset_info}
+
+ANALYSIS REQUIREMENTS:
+1. Focus on the selected dataset: '{selected_dataset}'
+2. Handle missing data explicitly using .dropna() or .fillna()
+3. Validate data before operations:
+   - Check column existence
+   - Verify non-empty DataFrames/Series before .iloc/.index
+   - Validate categorical operations with value_counts()
+4. Create informative visualizations:
+   - Use clear titles and labels
+   - Include error bars where applicable
+   - Use appropriate plot types for data types
+   - when feasible, use plots as close as possible to what the user asks for
+   - ALWAYS convert Plotly figures to dictionary using fig.to_dict()
+
+RESULTS REQUIREMENTS:
+1. The 'result' dictionary MUST contain well-structured DataFrames that:
+   - Have clear, descriptive names (e.g., 'summary_stats', 'correlations', 'aggregated_data')
+   - Are formatted for reuse in further analysis
+   - Include proper column names and indices
+   - Preserve data types appropriately
+   - ALWAYS use reset_index() on any DataFrame before adding to results
+2. Example result structure:
+   ```python
+   result = {{
+       'summary_stats': df.describe().reset_index(),  # Include reset_index() for better reusability
+       'correlations': correlation_matrix.reset_index(),
+       'aggregated_data': grouped_data.reset_index()
+   }}
+   ```
+3. DO NOT return raw statistical results - always wrap them in a DataFrame
+4. Include descriptive statistics when relevant
+5. Format categorical summaries as DataFrames with counts and proportions
+6. ALWAYS ensure each DataFrame in results has meaningful column names
+
+VISUALIZATION REQUIREMENTS:
+1. ALWAYS format visualization data exactly as follows:
+   ```python
+   viz_data = {{
+       'type': 'plotly',  # REQUIRED
+       'figure': fig.to_dict()  # REQUIRED - must use to_dict()
+   }}
+   ```
+2. Set appropriate figure layout:
+   ```python
+   fig.update_layout(
+       title_x=0.5,  # Center title
+       showlegend=True,  # Show legend when multiple traces
+       paper_bgcolor='white',  # White background
+       plot_bgcolor='white'    # White plot area
+   )
+   ```
+3. If using a multiplot, ENSURE the specs argument matches the type of plots you are making and putting in each column and row.
+For example: 
+- spec='xy' for scatter, histogram, and bar charts
+- spec='heatmap' for heatmap
+- spec='box' for box and violin
+- spec='domain' for pie
+- spec='surface' for surface
+- spec='chloropleth' for chloropleth
+- spec='treemap' for treemap
+- spec='funnel' for funnel
+- spec='candlestick' for candlestick
+- spec='contour' for contour
+- spec='scattergeo' for scattergeo
+4. DO NOT try and pack too many figures into one visualization. There is finite space for the figure in the chat window so do not make the figure too large or too complex.
+5. DO NOT set the height and width of the figure
+6. LEAVE OUT vertical and horizontal space directives when you updating layout or defining the plot or multiplot. 
+7. Use clear subplot titles and axis labels
+8. Include hover information for better interactivity
+9. Set appropriate margins and spacing
+10. For multiple subplots, use descriptive subplot titles
+
+DATA VALIDATION REQUIREMENTS:
+1. ONLY use columns that are listed above in the dataset information
+2. AVOID using direct numeric indexing - always use column names
+3. Column names are CASE SENSITIVE - use exact case as shown in dataset information
+4. Always verify column existence before use:
+   ```python
+   if 'Column_Name' not in df.columns:  # Use exact case
+       raise ValueError("Required column 'Column_Name' not found in dataset")
+   ```
+
+AVAILABLE LIBRARIES (pre-imported, DO NOT import others):
+- pandas (pd): Data manipulation and analysis
+- numpy (np): Numerical operations
+- plotly.express (px): High-level plotting
+- plotly.graph_objects (go): Low-level plotting
+- plotly.subplots (make_subplots): Multiple plots
+- scipy.stats: Statistical functions
+- sklearn.preprocessing: Data preprocessing
+
+CRITICAL REQUIREMENTS:
+1. You MUST use the exact code template provided below WITHOUT ANY MODIFICATIONS to its structure
+2. You MUST keep the '# Code ID: {{ID}}' line exactly as is - do not change the {{ID}} placeholder
+3. You MUST implement ONLY the analysis logic inside the analyze_data function. You CANNOT define any other functions.
+4. You MUST access data using the datasets dictionary and selected dataset:
+   CORRECT:   df = pd.DataFrame(datasets['{selected_dataset}']['df'])
+   INCORRECT: df = ... or using df directly
+5. You MUST return results in this format:
+   - result: Dict[str, pd.DataFrame] with analysis results
+   - viz_data: Dict with 'type': 'plotly' and 'figure': fig.to_dict()
+6. DO NOT add any imports - they are already included in the template
+7. DO NOT add your own validation code - it's already in the template
+8. ONLY use column names that are listed above in the dataset information
+9. Before using any column, verify it exists in the DataFrame:
+   ```python
+   # Example column validation
+   if 'column_name' not in df.columns:
+       raise ValueError("Required column 'column_name' not found in dataset")
+   ```
+10. NEVER use any of these blocked operations as they are security risks:
+    - eval, exec, compile (code execution)
+    - open, file, os, sys (file/system access)
+    - subprocess, import, __import__ (system/import operations)
+    - map (can be used for code execution)
+    Instead use:
+    - List comprehensions instead of map()
+    - Built-in pandas/numpy functions for data operations
+    - Explicit loops when needed
+
+Code Template (DO NOT MODIFY ANY PART OF THIS TEMPLATE):
+```python
+{self.CODE_TEMPLATE.format(ID="{{ID}}", implementation="# Your implementation here")}
+```
+
+Recent validation issues to avoid:
+{chr(10).join(validation_history) if validation_history else "No recent validation issues"}
+
+Format your response as:
+1. Brief analysis plan addressing the user's request
+2. Code block with implementation (using template EXACTLY as shown)
+3. Expected results explanation including:
+   - Description of each DataFrame in the results
+   - Explanation of the visualization
+   - Potential insights that could be derived
+4. End with a clear "To execute this analysis, type 'run.' in the chat." instruction
+
+Use chain-of-thought reasoning to determine the best way to approach the analysis while meeting all the requirements.
+"""
+
+        print("System prompt prepared, length:", len(system_prompt))
+        
+        # Calculate safe token limits
+        limits = self._calculate_context_limits(system_prompt)
+        print(f"Token limits calculated: {limits}")
+        
+        # Prepare context messages with token limit
+        context_messages = [
+            {
+                "role": "system",
+                "content": system_prompt
+            }
         ]
         
-        # Create focused context matching database service pattern
-        service_context = ServiceContext(
-            source=self.name,
-            data={
-                'code_id': code_id,
-                'dataset_name': selected_dataset,
-                'analysis_type': 'summary_with_viz',
-                'code': analysis_code
-            },
-            metadata={
-                'dataset_info': {
-                    'rows': len(df),
-                    'columns': len(df.columns),
-                    'numeric_columns': list(numeric_cols)[:5],
-                    'categorical_columns': list(categorical_cols)[:5]
-                },
-                'request': params.get('description', 'general analysis'),
-                'timestamp': datetime.now().isoformat()
+        # Add relevant history within token limit
+        token_count = self.count_tokens(system_prompt)
+        history_messages = []
+        
+        # First add most recent messages up to token limit
+        for msg in reversed(chat_history[-10:]):
+            msg_tokens = self.count_tokens(msg.get('content', ''))
+            if token_count + msg_tokens > limits['history']:
+                break
+                
+            if msg.get('service') == self.name:
+                history_messages.insert(0, {
+                    "role": "assistant",
+                    "content": msg['content']
+                })
+            else:
+                history_messages.insert(0, {
+                    "role": msg['role'],
+                    "content": msg['content']
+                })
+            token_count += msg_tokens
+        
+        # Create final context messages
+        context_messages = [
+            {
+                "role": "system",
+                "content": system_prompt
             }
-        )
+        ]
+        context_messages.extend(history_messages)
         
-        return ServiceResponse(
-            messages=[ServiceMessage(
-                service=self.name,
-                content="\n".join(response_parts),
-                message_type="info",
-                role="assistant"
-            )],
-            context=service_context,
-            state_updates={'chat_input': ''}
-        )
+        # Verify total token count
+        total_tokens = sum(self.count_tokens(msg['content']) for msg in context_messages)
+        print(f"Total context tokens: {total_tokens}/{limits['total_available']}")
+        
+        if total_tokens > limits['total_available']:
+            print("Warning: Context too large, truncating history")
+            # Keep system prompt and most recent messages
+            context_messages = [context_messages[0]] + context_messages[-2:]
+            total_tokens = sum(self.count_tokens(msg['content']) for msg in context_messages)
+            print(f"Truncated context tokens: {total_tokens}/{limits['total_available']}")
+        
+        print(f"Added {len(context_messages)-1} history messages")
+        return system_prompt, context_messages, limits
 
-    def _process_multiple_results(self, results: dict, code_id: str, dataset_name: str, store_updates: dict) -> Tuple[list, str, dict]:
-        """Process multiple DataFrame results and generate previews."""
-        result_ids = []
-        previews = []
+    def _validate_code_structure(self, code: str) -> Tuple[bool, Optional[str]]:
+        """Validate that code follows the required template structure.
         
-        # Track summary info for context
-        result_summary = []
-        print("results:", results)
+        Args:
+            code: The code block to validate
+            
+        Returns:
+            Tuple[bool, Optional[str]]: (is_valid, error_message)
+        """
+        try:
+            # Check for required template elements
+            if not code.startswith("# Code ID:"):
+                return False, "Code must start with '# Code ID:' line"
+                
+            # Check for analyze_data function
+            if "def analyze_data(datasets):" not in code:
+                return False, "Code must contain analyze_data function definition"
+                
+            # Check for imports
+            if any(line.strip().startswith(('import ', 'from ')) for line in code.split('\n')):
+                return False, "Code should not contain import statements - they are in the template"
+                
+            # Check for function definitions
+            function_defs = [line for line in code.split('\n') if line.strip().startswith('def ')]
+            if len(function_defs) > 1:  # Only analyze_data allowed
+                return False, "Code should not contain additional function definitions"
+                
+            # Check for required return structure
+            if "return result, viz_data" not in code:
+                return False, "Code must return result and viz_data"
+                
+            return True, None
+            
+        except Exception as e:
+            return False, f"Structure validation failed: {str(e)}"
+
+    def summarize(self, content: str, chat_history: List[Dict[str, Any]]) -> str:
+        """Generate a summary of analysis results.
         
-        # Create first ID with prefix
-        previous_id = None
+        Args:
+            content: The content to summarize (analysis results)
+            chat_history: List of previous chat messages
+            
+        Returns:
+            str: The generated summary
+        """
+        # Get relevant context from chat history
+        context = self._filter_history_by_tokens(chat_history, max_tokens=4000)
         
-        # Initialize successful_queries_store
-        store_updates['successful_queries_store'] = {}
+        # Create system prompt for result summarization
+        system_prompt = """You are a data analysis assistant that helps summarize and interpret analysis results.
+        Your task is to:
+        1. Understand the analysis results provided
+        2. Extract key findings and insights
+        3. Suggest potential next steps or follow-up analyses
         
-        for result_name, df in results.items():
-            if df is not None and isinstance(df, pd.DataFrame):
-                # Generate ID based on whether we have a previous one
-                if previous_id is None:
-                    result_id = PreviewIdentifier.create_id(prefix="dataset")
+        Format your response as:
+        1. Key findings (2-3 bullet points)
+        2. Detailed interpretation
+        3. Suggested next steps
+        4. Any specific information you can use to link these results to general biological and environmental knowledge as follows:
+        4a. If there is latitude and longitude data, you can use it to link to specific geographic or environmental conditions or species distributions.
+        4b. If there is date data, you can use it to link to seasonal or climatic conditions.
+        4c. If there is depth data, you can use it to link to hydrographic or oceanographic conditions.
+        4d. If there chemical concentration data, you can use it to link to known environmental distributions or toxicological effects.
+        4e. If there is species data, you can use it to link to known species distributions or ecological interactions and functions. 
+        4f. If there is temperature data, you can use it to link to known temperature distributions and effects on species and ecosystems.
+        Focus on making the results accessible and actionable for the user.
+        """
+        
+        # Convert context messages
+        context_messages = [
+            {
+                "role": "system" if msg.get("role") == "system" else "user",
+                "content": msg.get("content", "")
+            }
+            for msg in context
+        ]
+        
+        # Add the content to summarize
+        context_messages.append({
+            "role": "user",
+            "content": f"Please summarize these analysis results:\n\n{content}"
+        })
+        
+        # Get LLM response
+        return self._call_llm(context_messages, system_prompt)
+
+    def _build_dataset_context(self, datasets_store: Dict) -> str:
+        """Build rich context information about available datasets.
+        
+        Args:
+            datasets_store: Dictionary of available datasets
+            
+        Returns:
+            str: Formatted dataset information including structure and statistics
+        """
+        context_parts = []
+        
+        for name, data in datasets_store.items():
+            df = pd.DataFrame(data['df'])
+            
+            # Basic dataset info
+            parts = [
+                f"\nDataset: {name}",
+                f"Rows: {len(df)}",
+                f"Columns: {len(df.columns)}"
+            ]
+            
+            # Column information
+            column_info = []
+            for col in df.columns:
+                stats = []
+                dtype = df[col].dtype
+                stats.append(f"type: {dtype}")
+                
+                # Add type-specific statistics
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    stats.extend([
+                        f"range: [{df[col].min():.2f} to {df[col].max():.2f}]",
+                        f"missing: {df[col].isna().sum()}"
+                    ])
                 else:
-                    result_id = PreviewIdentifier.create_id(previous_id=previous_id)
-                previous_id = result_id  # Update for next iteration
-                result_ids.append(result_id)
+                    n_unique = df[col].nunique()
+                    stats.extend([
+                        f"unique values: {n_unique}",
+                        f"missing: {df[col].isna().sum()}"
+                    ])
                 
-                preview = f"{result_name.title()} Result ({len(df)} rows × {len(df.columns)} columns):\n"
-                preview += f"Dataset ID: {result_id}\n"
-                preview += f"```\n{df.head().to_string()}\n```"
-                previews.append(preview)
-                
-                # Add to summary
-                result_summary.append(f"{result_name}: {len(df)} rows × {len(df.columns)} columns")
-                
-                store_updates['successful_queries_store'][result_id] = {
-                    'type': 'dataframe',
-                    'code_id': code_id,
-                    'dataframe': df.to_dict('records'),
-                    'metadata': {
-                        'source_dataset': dataset_name,
-                        'result_type': result_name,
-                        'execution_time': datetime.now().isoformat(),
-                        'rows': len(df),
-                        'columns': list(df.columns)
-                    }
-                }
+                column_info.append(f"  - {col} ({', '.join(stats)})")
+            
+            parts.append("\nColumns:")
+            parts.extend(column_info)
+            
+            context_parts.append("\n".join(parts))
         
-        # Create context data using first DataFrame but including summary
-        first_df = next((df for df in results.values() if df is not None), None)
-        
-        # Build context that summarizes all results
-        context_data = {
-            'results_summary': {
-                name: {
-                    'rows': len(df) if df is not None else 0,
-                    'columns': list(df.columns) if df is not None else [],
-                    'preview': df.head().to_dict('records') if df is not None else {}
-                }
-                for name, df in results.items()
-            },
-            'code_id': code_id,
-            'dataset_name': dataset_name,
-            # Include first DataFrame's data for backward compatibility
-            'data': first_df.to_dict('records') if first_df is not None else {}
-        }
-
-        # Create service context
-        service_context = ServiceContext(
-            source=self.name,
-            data=context_data,
-            metadata={
-                'execution_time': datetime.now().isoformat(),
-                'result_count': len(results),
-                'analysis_prompts': [
-                    "Please analyze the results of the code execution:",
-                    "- Summarize what each DataFrame contains",
-                    "- Note any interesting patterns or relationships between the results",
-                    "- Suggest potential next steps for analysis"
-                ]
-            }
-        )
-
-        return result_ids, "\n\n".join(previews), context_data
+        return "\n".join(context_parts)
 
     def execute(self, params: dict, context: dict) -> ServiceResponse:
         """Execute dataset service request."""
@@ -1394,5 +2293,3 @@ result = {{
                 )],
                 state_updates={'chat_input': ''}
             )
-
-# ... rest of the existing code ... 

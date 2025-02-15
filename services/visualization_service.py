@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import re
 import colorsys
 import numpy as np
-from .base import ChatService, ServiceResponse, ServiceMessage, ServiceContext
+from .base import ChatService, ServiceResponse, ServiceMessage
 from scipy.cluster.hierarchy import linkage, optimal_leaf_ordering, leaves_list
 from scipy.spatial.distance import pdist
 
@@ -854,8 +854,7 @@ class VisualizationService(ChatService):
                     service=self.name,
                     content="No datasets are currently loaded. Please load a dataset first.",
                     message_type="error"
-                )],
-                context=None
+                )]
             )
             
         if not selected_dataset:
@@ -864,8 +863,7 @@ class VisualizationService(ChatService):
                     service=self.name,
                     content="No dataset is selected. Please select a dataset first.",
                     message_type="error"
-                )],
-                context=None
+                )]
             )
             
         # Get the visualization type
@@ -876,8 +874,7 @@ class VisualizationService(ChatService):
                     service=self.name,
                     content=f"Visualization type '{params['type']}' not implemented yet.",
                     message_type="error"
-                )],
-                context=None
+                )]
             )
             
         # Get the dataset
@@ -891,8 +888,7 @@ class VisualizationService(ChatService):
                     service=self.name,
                     content=f"Error parsing visualization parameters: {error}",
                     message_type="error"
-                )],
-                context=None
+                )]
             )
             
         # Create the visualization
@@ -909,7 +905,6 @@ class VisualizationService(ChatService):
                     content=f"Creating {params['type']} visualization. Switching to visualization tab.",
                     message_type="info"
                 )],
-                context=None,
                 state_updates={
                     'active_tab': 'tab-viz',
                     'viz_state': {
@@ -929,5 +924,4 @@ class VisualizationService(ChatService):
                     content=f"Error creating visualization: {str(e)}",
                     message_type="error"
                 )],
-                context=None
             ) 
