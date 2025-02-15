@@ -90,7 +90,6 @@ from services import ServiceMessage
 from services import initialize_index_search
 from dash.exceptions import PreventUpdate
 from services import PreviewIdentifier
-from services.base import ServiceContext  # Import at top for type hint
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore', category=Warning)
@@ -734,6 +733,8 @@ def create_system_message(dataset_info: List[Dict[str, Any]],
     base_message += "\n     * DO NOT restate what the service has already said"
     base_message += "\n     * DO NOT suggest new queries when service has already returned results"
     base_message += "\n     * For search results, analyze the returned data rather than suggesting new searches"
+    base_message += "\n     * CRITICAL: DO NOT suggest python code or any related code. The dataset service LLM will do that for you."
+    base_message += "\n     * If you do notice an error in the code, call it out and explain why it is an error."
     
     base_message += "\n\n4. Progressive Analysis:"
     base_message += "\n   - Build upon previous analyses and visualizations"
@@ -1612,41 +1613,39 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                     chat_history.append(msg.to_chat_message())
                 
                 # Create system message with context for LLM
-                if response.context:
-                    system_message = create_system_message(
-                        dataset_info=[{
-                            'name': name,
-                            'rows': len(pd.DataFrame(data['df'])),
-                            'columns': list(pd.DataFrame(data['df']).columns),
-                            'selected': name == selected_dataset
-                        } for name, data in datasets.items()] if datasets else [],
-                        database_structure=database_structure_store,
-                        #service_context=response.context if response.context else None
-                    )
-                else:
-                    system_message = create_system_message(
-                        dataset_info=[{
-                            'name': name,
-                            'rows': len(pd.DataFrame(data['df'])),
-                            'columns': list(pd.DataFrame(data['df']).columns),
-                            'selected': name == selected_dataset
-                        } for name, data in datasets.items()] if datasets else [],
-                        database_structure=database_structure_store
-                    )
+                system_message = create_system_message(
+                    dataset_info=[{
+                        'name': name,
+                        'rows': len(pd.DataFrame(data['df'])),
+                        'columns': list(pd.DataFrame(data['df']).columns),
+                        'selected': name == selected_dataset
+                    } for name, data in datasets.items()] if datasets else [],
+                    database_structure=database_structure_store
+                )
                 
                 # Get LLM response
                 messages = get_context_messages(system_message, chat_history)
-
-                llm_response = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=0.4,
-                    max_tokens=8192
-                )
+                try:
+                    llm_response = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=0.4,
+                        max_tokens=8192
+                    )
+                except Exception as e:
+                    print(f"Error in LLM response: {str(e)}")
+                    raise e
 
                 # Extract content from response
                 ai_response = llm_response.choices[0].message.content
-                
+
+                print(f"********* LLM response: {ai_response}")
+                length_sum=0
+                for msg in messages:
+                    length_sum += count_tokens(msg.get('content', ''))
+                    if msg.get('content', '')=='':
+                        print(f"    ********* Message: {msg}")
+                print(f"    ********* Length sum: {length_sum}")
                 # Process SQL blocks if present
                 if '```sql' in ai_response.lower():
                     ai_response = add_query_ids_to_response(ai_response)
@@ -3680,7 +3679,7 @@ def count_tokens(text: str) -> int:
     return int(len(text.split()) * 1.3)
 
 def get_context_messages(system_message: str, chat_history: list, max_tokens: int = 8000) -> list:
-    """Get as many messages as possible within token limit, prioritizing recent messages.
+    """Get context messages within token limit, prioritizing critical messages.
     
     Args:
         system_message: The system prompt
@@ -3690,58 +3689,89 @@ def get_context_messages(system_message: str, chat_history: list, max_tokens: in
     Returns:
         List of messages within token limit, in chronological order
     """
-    # First count tokens for recent messages
-    recent_messages = []
-    token_count = 0
+    # First count system message tokens
+    system_tokens = count_tokens(system_message)
     
-    # Create a special context summary message
-    context_summary = []
+    # Reserve tokens for system message and buffer
+    available_tokens = max_tokens - system_tokens - 500  # 500 token buffer
+    
+    if available_tokens <= 0:
+        print(f"Warning: System message is too long ({system_tokens} tokens)")
+        return [{'role': 'system', 'content': system_message}]
+    
+    # Initialize with system message
+    messages = [{'role': 'system', 'content': system_message}]
+    token_count = system_tokens
+    
+    # Find most recent service message and user request
+    recent_service_msg = None
+    recent_user_msg = None
+    
     for msg in reversed(chat_history):
-        msg_tokens = count_tokens(str(msg['content']))
-        if token_count + msg_tokens > (max_tokens * 0.7):  # Leave room for system message
-            break
-            
-        # Format message based on type
-        if 'service' in msg:
-            context_summary.append(f"Previous service response ({msg['service']}): {msg['content']}")
-        else:
-            context_summary.append(f"Previous {msg['role']} message: {msg['content']}")
-            
-        recent_messages.insert(0, {'role': msg['role'], 'content': str(msg['content'])})
-        token_count += msg_tokens
+        if not recent_service_msg and msg.get('service'):
+            recent_service_msg = msg
+            continue
+        if not recent_user_msg and msg['role'] == 'user':
+            recent_user_msg = msg
+            if recent_service_msg:  # If we have both, stop looking
+                break
     
-    # Create an explicit context message
-    if context_summary:
-        context_message = {
-            'role': 'system',
-            'content': "Previous conversation context:\n\n" + "\n\n".join(reversed(context_summary))
-        }
-        
-        # Start with context message, then system instructions
-        messages = [
-            context_message,
-            {'role': 'system', 'content': system_message}
-        ]
-    else:
-        messages = [{'role': 'system', 'content': system_message}]
+    # Add recent service message if exists
+    if recent_service_msg:
+        service_tokens = count_tokens(recent_service_msg.get('content', ''))
+        if token_count + service_tokens <= max_tokens - 500:
+            messages.append({
+                'role': 'assistant',
+                'content': recent_service_msg.get('content', '')
+            })
+            token_count += service_tokens
+            print(f"Added service message: {service_tokens} tokens")
     
-    # Add the actual messages for the conversation
-    messages.extend(recent_messages)
+    # Add user's request if exists
+    if recent_user_msg:
+        user_tokens = count_tokens(recent_user_msg.get('content', ''))
+        if token_count + user_tokens <= max_tokens - 500:
+            messages.append({
+                'role': 'user',
+                'content': recent_user_msg.get('content', '')
+            })
+            token_count += user_tokens
+            print(f"Added user message: {user_tokens} tokens")
+    
+    # Add other recent context if space remains
+    remaining_tokens = max_tokens - token_count - 500
+    if remaining_tokens > 0:
+        for msg in reversed(chat_history):
+            # Skip messages we already added
+            if msg == recent_service_msg or msg == recent_user_msg:
+                continue
+                
+            msg_tokens = count_tokens(msg.get('content', ''))
+            if token_count + msg_tokens > max_tokens - 500:
+                break
+                
+            # Format service messages
+            if 'service' in msg:
+                content_parts = msg['content'].split('\n\n', 1)
+                content = content_parts[1].strip() if len(content_parts) > 1 else msg['content']
+                messages.append({
+                    'role': 'assistant',
+                    'content': content
+                })
+            else:
+                messages.append({
+                    'role': msg.get('role', 'user'),
+                    'content': msg.get('content', '')
+                })
+            token_count += msg_tokens
     
     # Debug output
     print(f"\n=== Context Window Stats ===")
-    print(f"Total messages in history: {len(chat_history)}")
-    print(f"Messages included in context: {len(recent_messages)}")
-    print(f"Estimated tokens used: {token_count}/{max_tokens}")
-    print(f"Message types included: {[msg['role'] for msg in messages]}")
-    print("\n=== Message Order ===")
-    for i, msg in enumerate(messages):
-        print(f"\nMessage {i}:")
-        print(f"Role: {msg['role']}")
-        print(f"Content preview: {msg['content'][:100]}...")
-        if 'service' in msg:
-            print(f"Service: {msg.get('service')}")
-            print(f"Type: {msg.get('type')}")
+    print(f"System message tokens: {system_tokens}")
+    print(f"History tokens: {token_count - system_tokens}")
+    print(f"Total tokens: {token_count}/{max_tokens}")
+    print(f"Messages included: {len(messages)}")
+    print(f"Message types: {[msg['role'] for msg in messages]}")
     
     return messages
 
