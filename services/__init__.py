@@ -8,7 +8,6 @@ from typing import Dict, Any
 
 from .base import (
     PreviewIdentifier,
-    ServiceContext,
     ServiceMessage,
     ServiceResponse,
     ChatService,

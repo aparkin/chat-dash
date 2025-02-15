@@ -97,189 +97,6 @@ class PreviewIdentifier:
         return None
 
 @dataclass
-class ServiceContext:
-    """Standard format for context added to LLM prompt.
-    
-    This class defines the contract for service context that will be added to the LLM's
-    system message. Each service should provide its context in a consistent format:
-    
-    Required Data Fields:
-        action: str - The action that was performed (e.g., 'query_execution', 'info')
-        status: str - Status of the action ('completed', 'error', etc.)
-        content: Dict - Action-specific content
-        
-    Required Metadata Fields:
-        timestamp: str - When the action was performed
-        prompts: List[str] - Guidance for the LLM about this context
-    """
-    source: str
-    data: Dict[str, Any] = None
-    metadata: Dict[str, Any] = None
-    
-    def __post_init__(self):
-        """Initialize with default empty dicts and validate structure."""
-        self.data = self.data or {}
-        self.metadata = self.metadata or {}
-        
-        # Ensure required fields
-        if 'action' not in self.data:
-            self.data['action'] = 'unknown'
-        if 'status' not in self.data:
-            self.data['status'] = 'unknown'
-        if 'content' not in self.data:
-            self.data['content'] = {}
-            
-        if 'timestamp' not in self.metadata:
-            self.metadata['timestamp'] = datetime.now().isoformat()
-        if 'prompts' not in self.metadata:
-            self.metadata['prompts'] = []
-    
-    def format_context(self) -> str:
-        """Format context data for system message.
-        
-        This base implementation provides specialized formatting based on the action type.
-        Each action type gets its own custom formatting to provide the most relevant context
-        to the LLM.
-        
-        Returns:
-            str: Formatted context string to append to system message
-        """
-        # Start with source identification
-        formatted = f"\n\nContext from {self.source}:"
-        
-        # Get the action type
-        action = self.data.get('action', 'unknown')
-        status = self.data.get('status', 'unknown')
-        
-        # Format based on action type
-        if action == 'database_info':
-            formatted += self._format_database_info()
-        elif action == 'query_execution':
-            formatted += self._format_query_execution()
-        elif action == 'dataset_conversion':
-            formatted += self._format_dataset_conversion()
-        else:
-            # Default formatting for unknown actions
-            formatted += f"\nAction: {action}"
-            formatted += f"\nStatus: {status}"
-            
-            # Add any content
-            content = self.data.get('content', {})
-            if content:
-                formatted += "\n\nContent:"
-                for key, value in content.items():
-                    formatted += f"\n- {key}: {value}"
-        
-        # Add analysis prompts if present
-        prompts = self.metadata.get('analysis_prompts', [])
-        if prompts:
-            formatted += "\n\nAnalysis Instructions:"
-            for prompt in prompts:
-                formatted += f"\n- {prompt}"
-                
-        return formatted
-    
-    def _format_database_info(self) -> str:
-        """Format context for database info action."""
-        formatted = "\n\nDatabase Structure Overview:"
-        structure = self.data.get('structure', {})
-        
-        if structure:
-            formatted += f"\nNumber of tables: {len(structure)}"
-            formatted += "\n\nTable Summary:"
-            for table, info in structure.items():
-                formatted += f"\n- {table}: {info['row_count']} rows, {len(info['columns'])} columns"
-                if info.get('foreign_keys'):
-                    formatted += f", {len(info['foreign_keys'])} foreign key relationships"
-        
-        return formatted
-    
-    def _format_query_execution(self) -> str:
-        """Format context for query execution action."""
-        cmd_state = self.data.get('command_state', {})
-        results = self.data.get('results', {})
-        
-        formatted = "\n\nQuery Execution Results:"
-        formatted += f"\nQuery ID: {cmd_state.get('query_id', 'unknown')}"
-        formatted += f"\nExecution Time: {cmd_state.get('execution_time', 'unknown')}"
-        
-        if results:
-            formatted += f"\nRows Retrieved: {results.get('total_rows', 0)}"
-            formatted += f"\nColumns: {', '.join(results.get('columns', []))}"
-            formatted += f"\nReferenced Tables: {', '.join(results.get('referenced_tables', []))}"
-            
-            # Add preview if available
-            preview = results.get('preview', [])
-            if preview:
-                formatted += "\n\nPreview of Results:"
-                # Format preview as a table
-                if isinstance(preview, list) and preview:
-                    # Get headers
-                    headers = list(preview[0].keys())
-                    # Add header row
-                    formatted += f"\n| {' | '.join(headers)} |"
-                    # Add separator
-                    formatted += f"\n| {' | '.join(['---' for _ in headers])} |"
-                    # Add data rows
-                    for row in preview:
-                        formatted += f"\n| {' | '.join(str(row[h]) for h in headers)} |"
-        
-        return formatted
-    
-    def _format_dataset_conversion(self) -> str:
-        """Format context for dataset conversion action."""
-        cmd_state = self.data.get('command_state', {})
-        result = self.data.get('conversion_result', {})
-        
-        formatted = "\n\nDataset Conversion Results:"
-        formatted += f"\nSource Query ID: {cmd_state.get('query_id', 'unknown')}"
-        formatted += f"\nNew Dataset Name: {result.get('dataset_name', 'unknown')}"
-        formatted += f"\nRows: {result.get('rows', 0)}"
-        formatted += f"\nColumns: {', '.join(result.get('columns', []))}"
-        
-        # Add source information
-        source = result.get('source', {})
-        if source:
-            formatted += "\n\nSource Information:"
-            formatted += f"\n- Type: {source.get('type', 'unknown')}"
-            formatted += f"\n- Query ID: {source.get('query_id', 'unknown')}"
-            if source.get('query_text'):
-                formatted += f"\n- Query Text: {source['query_text']}"
-        
-        # Add preview if available
-        preview = result.get('preview', [])
-        if preview:
-            formatted += "\n\nPreview of Dataset:"
-            # Format preview as a table
-            if isinstance(preview, list) and preview:
-                # Get headers
-                headers = list(preview[0].keys())
-                # Add header row
-                formatted += f"\n| {' | '.join(headers)} |"
-                # Add separator
-                formatted += f"\n| {' | '.join(['---' for _ in headers])} |"
-                # Add data rows
-                for row in preview:
-                    formatted += f"\n| {' | '.join(str(row[h]) for h in headers)} |"
-        
-        return formatted
-    
-    def to_dict(self) -> dict:
-        """Convert context to dictionary format.
-        
-        Returns the raw context data and metadata for storage or transmission.
-        Services should not need to override this method.
-        
-        Returns:
-            dict: Raw context data and metadata
-        """
-        return {
-            'source': self.source,
-            'data': self.data,
-            'metadata': self.metadata
-        }
-
-@dataclass
 class ServiceMessage:
     """Standard format for service-generated chat messages."""
     service: str
@@ -287,19 +104,20 @@ class ServiceMessage:
     message_type: str = 'info'
     role: str = 'system'
     
+    def __post_init__(self):
+        """Validate message content after initialization."""
+        if not self.content or not self.content.strip():
+            raise ValueError("Service message content cannot be empty")
+        self.content = self.content.strip()
+    
     def to_chat_message(self) -> dict:
         """Convert to chat message format."""
         # Format content to explicitly mark it as a service response
-        formatted_content = f"""
-Type: {self.message_type}
-
-{self.content}
-
-"""
+        formatted_content = f"Type: {self.message_type}\n\n{self.content}"
         
         return {
             'role': self.role,
-            'content': formatted_content,
+            'content': formatted_content.strip(),  # Ensure no leading/trailing whitespace
             'service': self.service,
             'type': self.message_type,
             'timestamp': datetime.now().isoformat()
@@ -309,7 +127,6 @@ Type: {self.message_type}
 class ServiceResponse:
     """Container for service execution results."""
     messages: List[ServiceMessage]
-    context: Optional[ServiceContext] = None
     store_updates: Dict[str, Any] = None
     state_updates: Dict[str, Any] = None
     
