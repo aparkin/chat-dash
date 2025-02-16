@@ -2,7 +2,64 @@
 LLM Service Mixin for ChatDash services.
 
 This module provides a mixin class that services can use to add LLM capabilities
-for processing messages and generating responses.
+for processing messages and generating responses. It implements a standardized approach
+to LLM integration with the following key features:
+
+Architecture:
+1. Context Management:
+   - Smart filtering of chat history
+   - Token budget management
+   - Domain-specific context building
+
+2. Configuration:
+   - Service-specific model selection
+   - Environment-based configuration
+   - Flexible temperature settings
+
+3. Error Handling:
+   - Structured retry logic
+   - Validation history tracking
+   - Clear error hierarchies
+
+4. State Management:
+   - Immutable state updates
+   - Clear state ownership
+   - Centralized state tracking
+
+Usage:
+    ```python
+    class MyService(ChatService, LLMServiceMixin):
+        def __init__(self):
+            ChatService.__init__(self, "my_service")
+            LLMServiceMixin.__init__(self, "my_service")
+            
+        def process_message(self, message: str, chat_history: List[Dict]) -> str:
+            # Build context
+            system_prompt, context_messages, limits = self._prepare_llm_context(
+                message, chat_history, domain_context
+            )
+            
+            # Get LLM response with retry logic
+            response = self._call_llm(context_messages, system_prompt)
+            
+            # Process and validate response
+            return self._process_response(response)
+    ```
+
+Configuration:
+    The following environment variables can be set per service:
+    - {SERVICE_NAME}_MODEL: Model to use (default: "anthropic/claude-sonnet")
+    - {SERVICE_NAME}_TEMPERATURE: Temperature setting (default: 0.4)
+    Example:
+    ```bash
+    DATASET_MODEL="anthropic/claude-opus"
+    DATASET_TEMPERATURE="0.7"
+    ```
+
+Dependencies:
+    - openai: OpenAI API client
+    - tiktoken: Token counting
+    - python-dotenv: Environment variable management
 """
 
 from abc import ABC, abstractmethod
@@ -20,18 +77,51 @@ load_dotenv()
 
 @dataclass
 class LLMConfig:
-    """Configuration for LLM service."""
+    """Configuration for LLM service.
+    
+    Attributes:
+        model_name: Name of the LLM model to use
+        temperature: Temperature setting for response generation
+    """
     model_name: str
     temperature: float
 
 class LLMServiceMixin(ABC):
-    """Mixin class providing LLM capabilities to services."""
+    """Mixin class providing LLM capabilities to services.
+    
+    This mixin provides a standardized way to integrate LLM capabilities into
+    ChatDash services. It handles:
+    1. LLM configuration and initialization
+    2. Context management and token budgeting
+    3. Message processing and response generation
+    4. Error handling and retry logic
+    
+    Implementation Requirements:
+    1. Services must initialize both ChatService and LLMServiceMixin
+    2. Services must implement process_message() for custom message handling
+    3. Services should use _prepare_llm_context() for context management
+    4. Services should use _call_llm() for all LLM interactions
+    
+    Token Management:
+    The mixin implements smart token management to:
+    - Stay within model context limits
+    - Reserve space for system prompts
+    - Allow for validation iterations
+    - Maintain relevant chat history
+    
+    Error Handling:
+    Provides structured error handling with:
+    - Retry logic for validation failures
+    - History tracking for validation errors
+    - Clear error messages and tracebacks
+    """
     
     def __init__(self, service_name: str):
         """Initialize LLM service configuration.
         
         Args:
-            service_name: Name of the service using this mixin
+            service_name: Name of the service using this mixin.
+                Used for service-specific configuration.
         """
         self.service_name = service_name
         self.llm_config = self._load_llm_config()

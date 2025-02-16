@@ -488,7 +488,7 @@ class DatabaseTextSearch:
                     table_result['details'][column] = {
                         'matches': matched_values,
                         'counts': {m: details['value_counts'].get(m, 0) for m in matched_values},
-                        'similarities': {m: ratio for m, ratio in matches}
+                        'similarities': {m: ratio for m, ratio in matches}  # Keep raw ratio (0-100)
                     }
             
             print(f"\nTotal results: {len(results)}")
@@ -615,14 +615,14 @@ class DatasetTextSearch:
                         details[col_name] = {
                             'matches': matched_values,
                             'counts': {m: col_info['value_counts'].get(m, 0) for m in matched_values},
-                            'similarities': {m: ratio for m, ratio in matches}
+                            'similarities': {m: ratio for m, ratio in matches}  # Keep raw ratio (0-100)
                         }
                 
                 if details:
                     results.append({
                         'source_name': dataset_name,     # Changed from 'dataset'
                         'source_type': 'dataset',        # Added this field
-                        'similarity': max(max(d['similarities'].values()) for d in details.values()) / 100,
+                        'similarity': max(max(d['similarities'].values()) for d in details.values()),
                         'matched_text': f"Found matches in dataset {dataset_name}",
                         'details': details
                     })

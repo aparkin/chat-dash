@@ -2,39 +2,78 @@
 Dataset service implementation.
 
 This service handles dataset analysis and code execution in the ChatDash application.
-It provides a modular interface for:
-1. Dataset information and exploration
-2. Safe code execution for analysis
-3. Dataset creation from analysis results
-4. Dataset state management
-5. LLM-assisted analysis planning and summarization
+It provides a modular interface for dataset operations and integrates LLM capabilities
+for intelligent code generation and analysis.
+
+Key Features:
+1. Dataset Management:
+   - Dataset information and exploration
+   - Safe code execution for analysis
+   - Dataset creation from analysis results
+   - Dataset state management
+   - LLM-assisted analysis planning
+
+2. Code Generation:
+   - Template-based code generation
+   - LLM-powered analysis customization
+   - Strict validation of code structure
+   - Safe execution environment
+   - Result validation and type checking
+
+3. Visualization:
+   - Interactive plot generation
+   - State management for visualizations
+   - Plot configuration validation
+   - JSON serialization handling
+   - View state persistence
 
 Architecture:
-- Exception Hierarchy:
-  - DatasetAnalysisException: Base exception for all dataset-related errors
-  - ValidationError: Raised when code validation fails
-  - ExecutionError: Raised when code execution fails
-  - SecurityError: Raised when code violates security constraints
+1. Exception Hierarchy:
+   - DatasetAnalysisException: Base exception for all dataset-related errors
+   - ValidationError: Raised when code validation fails
+   - ExecutionError: Raised when code execution fails
+   - SecurityError: Raised when code violates security constraints
 
-- Core Components:
-  - CodeValidator: Validates code blocks for safety and correctness
-  - CodeExecutor: Executes validated code blocks in a controlled environment
-  - DatasetService: Main service class handling all dataset operations
+2. Core Components:
+   - CodeValidator: Validates code blocks for safety and correctness
+   - CodeExecutor: Executes validated code blocks in a controlled environment
+   - DatasetService: Main service class handling all dataset operations
 
-- Command Types:
-  - info: Dataset information requests
-  - validate: Code block validation
-  - execute: Code execution
-  - convert: Dataset conversion
-  - analysis: Analysis generation
+3. Command Types:
+   - info: Dataset information requests
+   - validate: Code block validation
+   - execute: Code execution
+   - convert: Dataset conversion
+   - analysis: Analysis generation
 
-- Code Generation:
-  The service uses a template-based approach for code generation with:
-  - Strict validation of code structure
-  - Safe execution environment
-  - Proper initialization of analysis function
-  - Result validation and type checking
-  - Visualization state management
+4. LLM Integration:
+   - Uses LLMServiceMixin for code generation
+   - Maintains analysis context
+   - Handles validation retries
+   - Manages token budgets
+   - Processes LLM responses
+
+Usage Example:
+    ```python
+    # Initialize service
+    service = DatasetService()
+    
+    # Handle analysis request
+    response = service.execute(
+        params={'command': 'analysis', 'description': 'Analyze temperature trends'},
+        context={
+            'datasets_store': datasets,
+            'selected_dataset': 'climate_data',
+            'chat_history': history
+        }
+    )
+    
+    # Execute generated code
+    result = service.execute(
+        params={'command': 'execute', 'code_id': 'datasetCode_20240315_123456'},
+        context={...}
+    )
+    ```
 
 Dependencies:
 - pandas: Data manipulation and analysis
@@ -43,6 +82,34 @@ Dependencies:
 - scipy.stats: Statistical functions
 - sklearn.preprocessing: Data preprocessing
 - ydata_profiling: Dataset profiling
+
+Implementation Notes:
+1. Code Generation:
+   - Uses template-based approach for consistency
+   - Implements strict validation of structure
+   - Maintains safe execution environment
+   - Validates results and types
+   - Manages visualization state
+
+2. Error Handling:
+   - Implements comprehensive exception hierarchy
+   - Provides detailed error messages
+   - Includes validation retry logic
+   - Maintains error history for context
+
+3. State Management:
+   - Tracks dataset state
+   - Manages visualization state
+   - Handles execution results
+   - Maintains analysis history
+   - Preserves user context
+
+4. Security:
+   - Validates all code execution
+   - Restricts available operations
+   - Sanitizes inputs and outputs
+   - Manages resource limits
+   - Tracks execution history
 """
 
 from typing import Dict, Any, Optional, List, Tuple, Union
@@ -73,6 +140,13 @@ class DatasetAnalysisException(Exception):
     
     This is the parent class for all dataset service specific exceptions.
     It provides a common base for catching and handling dataset-related errors.
+    
+    Usage:
+        try:
+            result = service.execute(...)
+        except DatasetAnalysisException as e:
+            # Handle any dataset-related error
+            print(f"Analysis error: {str(e)}")
     """
     pass
 
@@ -84,6 +158,10 @@ class ValidationError(DatasetAnalysisException):
     - Uses unauthorized imports
     - Missing required components
     - Invalid code structure
+    
+    Attributes:
+        message: Description of the validation failure
+        code: The code that failed validation (if available)
     """
     pass
 
@@ -95,6 +173,10 @@ class ExecutionError(DatasetAnalysisException):
     - Required variables are not set
     - Return values are missing or invalid
     - Runtime errors occur during execution
+    
+    Attributes:
+        message: Description of the execution failure
+        traceback: Full traceback of the error (if available)
     """
     pass
 
@@ -106,6 +188,10 @@ class SecurityError(DatasetAnalysisException):
     - Code tries to import unauthorized modules
     - Code attempts to modify system state
     - Code violates sandbox restrictions
+    
+    Attributes:
+        message: Description of the security violation
+        operation: The specific operation that was blocked
     """
     pass
 

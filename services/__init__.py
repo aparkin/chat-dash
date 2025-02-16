@@ -25,17 +25,17 @@ registry = ServiceRegistry()
 
 # Initialize basic services
 store_report_service = StoreReportService()
-literature_service = LiteratureService()
 visualization_service = VisualizationService()
 database_service = DatabaseService()
 dataset_service = DatasetService()
+literature_service = LiteratureService()
 
 # Register basic services
 registry.register(store_report_service)
-registry.register(literature_service)
 registry.register(visualization_service)
 registry.register(database_service)
 registry.register(dataset_service)
+registry.register(literature_service)
 
 def initialize_index_search(text_searcher: Any, text_searcher_db: Any) -> None:
     """Initialize the index search service with available searchers.
@@ -58,11 +58,10 @@ def initialize_index_search(text_searcher: Any, text_searcher_db: Any) -> None:
 
 __all__ = [
     'PreviewIdentifier',
-    'ServiceContext',
     'ServiceMessage',
     'ServiceResponse',
     'ChatService',
     'ServiceRegistry',
     'registry',
-    'initialize_index_search'  # Add initialization function to exports
+    'initialize_index_search'
 ] 

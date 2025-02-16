@@ -38,6 +38,8 @@ from typing import Dict, Any, List, Optional, Set
 import re
 from datetime import datetime
 import pandas as pd
+import json
+import io
 
 from .base import (
     ChatService,
@@ -45,6 +47,7 @@ from .base import (
     ServiceMessage,
     PreviewIdentifier
 )
+from .llm_service import LLMServiceMixin
 
 class SearchParameters:
     """Container for parsed search parameters.
@@ -91,7 +94,7 @@ class SearchResult:
         self.details = details
         self.timestamp = datetime.now()
 
-class IndexSearchService(ChatService):
+class IndexSearchService(ChatService, LLMServiceMixin):
     """Service for unified text search across all indexed sources.
     
     This service provides:
@@ -136,7 +139,8 @@ class IndexSearchService(ChatService):
                 # 'code': code_searcher,
             }
         """
-        super().__init__("index_search")
+        ChatService.__init__(self, "index_search")
+        LLMServiceMixin.__init__(self, "index_search")
         # Register our prefix for search result IDs
         PreviewIdentifier.register_prefix("search")
         
@@ -258,8 +262,8 @@ class IndexSearchService(ChatService):
         
         # Format columns
         if not df.empty:
-            # Format similarity as percentage
-            df['similarity'] = df['similarity'].apply(lambda x: f"{x*100:.1f}%")
+            # Format similarity as percentage - fuzz.ratio returns 0-100
+            df['similarity'] = df['similarity'].apply(lambda x: f"{x:.1f}%")
             
             # Sort by similarity (after converting to string)
             df = df.sort_values(by=['source_type', 'source_name', 'similarity'], 
@@ -511,12 +515,415 @@ class IndexSearchService(ChatService):
             for warning in warnings:
                 summary.append(f"- {warning}")
         
+        # Create initial response
+        response_content = "\n".join(summary)
+        messages = [
+            ServiceMessage(
+                service="index_search",
+                content=response_content
+            )
+        ]
+        
+        # Generate LLM summary if we have results
+        if results:
+            try:
+                # Pass the actual DataFrame to summarize instead of the preview text
+                llm_summary = self.summarize(results_df, context.get('chat_history', []))
+                if llm_summary:
+                    messages.append(
+                        ServiceMessage(
+                            service="index_search",
+                            content=f"\n### Analysis Summary\n\n{llm_summary}",
+                            message_type="info"
+                        )
+                    )
+            except Exception as e:
+                print(f"Error generating LLM summary: {str(e)}")
+                # Continue without summary
+        
         return ServiceResponse(
-            messages=[
-                ServiceMessage(
-                    service="index_search",
-                    content="\n".join(summary)
-                )
-            ],
+            messages=messages,
             store_updates=store_updates
-        ) 
+        )
+
+    def process_message(self, message: str, chat_history: List[Dict[str, Any]]) -> str:
+        """
+        Required by LLMServiceMixin but not used by IndexSearchService.
+        We don't use LLM for processing messages, only for summarization.
+        """
+        raise NotImplementedError("IndexSearchService does not use LLM for message processing")
+
+    def _compress_search_results(self, df: pd.DataFrame, max_tokens: int) -> Dict[str, Any]:
+        """
+        Compress search results into hierarchical structure within token budget.
+        
+        Args:
+            df: DataFrame with search results
+            max_tokens: Maximum tokens allowed for the compressed structure
+            
+        Returns:
+            Dict with compressed structure:
+            {
+                'source_type': {
+                    'source_name': {
+                        'column': {
+                            'matches': [{'term': str, 'similarity': float, 'count': int}, ...],
+                            'total_matches': int,
+                            'total_rows': int
+                        }
+                    }
+                },
+                'threshold_used': float  # If compression was needed
+            }
+        """
+        # Create initial hierarchical structure
+        compressed = {}
+        for _, row in df.iterrows():
+            source_type = row['Source Type']
+            source_name = row['Source Name']
+            column = row['Column']
+            
+            # Convert similarity back to float from percentage string
+            similarity = float(row['Similarity'].rstrip('%'))
+            
+            # Initialize nested dictionaries
+            if source_type not in compressed:
+                compressed[source_type] = {}
+            if source_name not in compressed[source_type]:
+                compressed[source_type][source_name] = {}
+            if column not in compressed[source_type][source_name]:
+                compressed[source_type][source_name][column] = {
+                    'matches': [],
+                    'total_matches': 0,
+                    'total_rows': 0
+                }
+            
+            # Add match
+            compressed[source_type][source_name][column]['matches'].append({
+                'term': row['Matched Value'],
+                'similarity': similarity,
+                'count': row['Count']
+            })
+            compressed[source_type][source_name][column]['total_matches'] += 1
+            compressed[source_type][source_name][column]['total_rows'] += row['Count']
+        
+        # Convert to string and check token count
+        compressed_str = json.dumps(compressed, indent=2)
+        token_count = self.count_tokens(compressed_str)
+        
+        # If within budget, return as is
+        if token_count <= max_tokens:
+            return {'data': compressed}
+            
+        # If over budget, find minimum similarity threshold that fits
+        similarities = df['Similarity'].apply(lambda x: float(x.rstrip('%'))).unique()
+        similarities.sort()
+        
+        for threshold in similarities:
+            # Filter df by threshold
+            filtered_df = df[df['Similarity'].apply(lambda x: float(x.rstrip('%'))) >= threshold]
+            
+            # Create compressed structure with filtered data
+            filtered_compressed = {}
+            for _, row in filtered_df.iterrows():
+                source_type = row['Source Type']
+                source_name = row['Source Name']
+                column = row['Column']
+                similarity = float(row['Similarity'].rstrip('%'))
+                
+                if source_type not in filtered_compressed:
+                    filtered_compressed[source_type] = {}
+                if source_name not in filtered_compressed[source_type]:
+                    filtered_compressed[source_type][source_name] = {}
+                if column not in filtered_compressed[source_type][source_name]:
+                    filtered_compressed[source_type][source_name][column] = {
+                        'matches': [],
+                        'total_matches': 0,
+                        'total_rows': 0
+                    }
+                
+                filtered_compressed[source_type][source_name][column]['matches'].append({
+                    'term': row['Matched Value'],
+                    'similarity': similarity,
+                    'count': row['Count']
+                })
+                filtered_compressed[source_type][source_name][column]['total_matches'] += 1
+                filtered_compressed[source_type][source_name][column]['total_rows'] += row['Count']
+            
+            # Check if this fits within token budget
+            filtered_str = json.dumps(filtered_compressed, indent=2)
+            if self.count_tokens(filtered_str) <= max_tokens:
+                return {
+                    'data': filtered_compressed,
+                    'threshold_used': threshold
+                }
+        
+        # If we get here, even highest threshold doesn't fit
+        # Take top N matches by similarity
+        top_df = df.nlargest(10, 'Similarity')
+        final_compressed = {}
+        for _, row in top_df.iterrows():
+            source_type = row['Source Type']
+            source_name = row['Source Name']
+            column = row['Column']
+            similarity = float(row['Similarity'].rstrip('%'))
+            
+            if source_type not in final_compressed:
+                final_compressed[source_type] = {}
+            if source_name not in final_compressed[source_type]:
+                final_compressed[source_type][source_name] = {}
+            if column not in final_compressed[source_type][source_name]:
+                final_compressed[source_type][source_name][column] = {
+                    'matches': [],
+                    'total_matches': 0,
+                    'total_rows': 0
+                }
+            
+            final_compressed[source_type][source_name][column]['matches'].append({
+                'term': row['Matched Value'],
+                'similarity': similarity,
+                'count': row['Count']
+            })
+            final_compressed[source_type][source_name][column]['total_matches'] += 1
+            final_compressed[source_type][source_name][column]['total_rows'] += row['Count']
+        
+        return {
+            'data': final_compressed,
+            'truncated': True,
+            'shown_matches': len(top_df)
+        }
+
+    def _calculate_context_limits(self, system_prompt: str) -> Dict[str, int]:
+        """Calculate token limits for search result summarization.
+        
+        Balances token budget between search results and chat history,
+        prioritizing search results to maintain as much detail as possible.
+        
+        Args:
+            system_prompt: The system prompt to be used
+            
+        Returns:
+            Dict with token limits:
+            {
+                'system_prompt': int,    # Fixed overhead for system prompt
+                'search_results': int,   # Primary allocation for search results
+                'chat_history': int,     # Smaller allocation for context
+                'total_available': int   # Total context window size
+            }
+        """
+        # Model context window
+        MAX_CONTEXT_TOKENS = 8192
+        
+        # Calculate system prompt overhead
+        system_tokens = self.count_tokens(system_prompt)
+        
+        # Reserve space for system prompt and safety margin
+        available_tokens = MAX_CONTEXT_TOKENS - system_tokens - 500  # 500 token safety margin
+        
+        # Prioritize search results (70%) over chat history (30%)
+        allocations = {
+            'system_prompt': system_tokens,
+            'search_results': int(available_tokens * 0.7),  # Majority for search results
+            'chat_history': int(available_tokens * 0.3),    # Smaller portion for context
+            'total_available': MAX_CONTEXT_TOKENS
+        }
+        
+        return allocations
+
+    def summarize(self, df: pd.DataFrame, chat_history: List[Dict[str, Any]]) -> str:
+        """Generate a summary of search results with biological/environmental context.
+        
+        Args:
+            df: DataFrame containing the search results
+            chat_history: List of previous chat messages
+            
+        Returns:
+            str: Generated summary focusing on:
+                - Broad topics and subclasses found
+                - Biological/environmental significance
+                - Organization across data sources
+                - Relationships and patterns
+        """
+        # Create system prompt for summarization
+        system_prompt = """You are a scientific data analyst specializing in biological and environmental data analysis.
+        Your task is to analyze search results from various data sources and provide a comprehensive summary that:
+
+        1. Term Origins and Distribution:
+           - For each source (database or dataset), explicitly list:
+             * The source name (e.g., table name or dataset name)
+             * The specific columns where terms were found
+             * The matched terms with their similarity scores
+           - Highlight which terms appear in multiple sources by:
+             * Identifying overlapping terms
+             * Listing the exact source names and columns where they appear
+             * Noting any patterns in how these shared terms are used
+
+        2. Topic Analysis:
+           - Identify broad topics and their subclasses from the matched values
+           - Group conceptually related terms
+           - Highlight any scientific nomenclature or technical terms
+           - Note which sources contribute to each topic group
+
+        3. Scientific Significance:
+           - Biological significance of matched terms
+           - Environmental implications
+           - Physical/chemical properties and their importance
+           - Known relationships to species, ecosystems, or processes
+
+        4. Data Organization:
+           - How different sources organize these concepts
+           - Patterns in data distribution across sources
+           - Relationships between different columns/sources
+           - Quality assessment based on match scores
+
+        5. Domain-Specific Context:
+           For matches related to:
+           a) Geographic data (lat/long):
+              - Link to specific geographic or environmental conditions
+              - Relevant species distributions
+              - Regional environmental characteristics
+           
+           b) Temporal data (dates):
+              - Seasonal patterns
+              - Climatic conditions
+              - Historical context
+           
+           c) Depth/elevation data:
+              - Hydrographic conditions
+              - Oceanographic implications
+              - Altitude-related patterns
+           
+           d) Chemical concentrations:
+              - Environmental distributions
+              - Toxicological effects
+              - Chemical processes
+           
+           e) Species data:
+              - Distribution patterns
+              - Ecological interactions
+              - Functional roles
+           
+           f) Temperature data:
+              - Effects on species/ecosystems
+              - Climate relationships
+              - Physiological implications
+
+        Format your response as:
+        1. Term Distribution (list each source and its terms)
+        2. Cross-Source Relationships (identify overlapping terms)
+        3. Key Findings (2-3 bullet points)
+        4. Detailed Analysis
+        5. Scientific Context
+        6. Suggested Further Analysis
+
+        IMPORTANT:
+        - Always specify exact source names and column names when discussing terms
+        - Explicitly identify when the same or similar terms appear across different sources
+        - For overlapping terms, list ALL sources and columns where they appear
+        - Maintain clarity about which source each term comes from
+
+        Focus on the most significant findings based on match scores and occurrence counts.
+        """
+        
+        # Calculate token limits
+        limits = self._calculate_context_limits(system_prompt)
+        
+        try:
+            # Compress results to fit token budget
+            compressed = self._compress_search_results(df, limits['search_results'])
+            
+            # Create context for LLM
+            context = {
+                'results': compressed['data'],
+                'total_matches': len(df),
+                'sources': df['Source Type'].nunique(),
+                'threshold_used': compressed.get('threshold_used'),
+                'truncated': compressed.get('truncated', False),
+                'shown_matches': compressed.get('shown_matches')
+            }
+            
+            # Convert to string for LLM
+            content = json.dumps(context, indent=2)
+            
+            # Get relevant chat history within token limit
+            messages = self._filter_history_by_tokens(chat_history, limits['chat_history'])
+            
+            # Create message list
+            llm_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Please analyze these search results:\n\n{content}"}
+            ]
+            
+            # Add filtered history
+            for msg in messages:
+                llm_messages.append({
+                    "role": msg.get('role', 'user'),
+                    "content": msg.get('content', '')
+                })
+            
+            # Get LLM response
+            response = self._call_llm(llm_messages)
+            return response
+            
+        except Exception as e:
+            print(f"Error in summarization: {str(e)}")
+            return f"Error generating summary: {str(e)}"
+
+    def _filter_history_by_tokens(self, chat_history: List[Dict[str, Any]], max_tokens: int) -> List[Dict[str, Any]]:
+        """Filter chat history to fit within token budget.
+        
+        Prioritizes:
+        1. Most recent search-related messages
+        2. Messages with search results or analysis
+        3. Recent user queries
+        
+        Args:
+            chat_history: Complete chat history
+            max_tokens: Maximum tokens allowed for history
+            
+        Returns:
+            List[Dict[str, Any]]: Filtered chat history within token budget
+        """
+        if not chat_history:
+            return []
+            
+        filtered_messages = []
+        token_count = 0
+        
+        # First pass: get most recent search-related messages
+        for msg in reversed(chat_history):
+            msg_tokens = self.count_tokens(msg.get('content', ''))
+            
+            # Skip if would exceed budget
+            if token_count + msg_tokens > max_tokens:
+                break
+                
+            # Prioritize messages from this service
+            if msg.get('service') == self.name:
+                filtered_messages.insert(0, msg)
+                token_count += msg_tokens
+                continue
+                
+            # Include search-related user messages
+            if msg['role'] == 'user' and any(term in msg.get('content', '').lower() 
+                                           for term in ['search', 'find', 'look for', 'query']):
+                filtered_messages.insert(0, msg)
+                token_count += msg_tokens
+                continue
+        
+        # Second pass: if space remains, add other recent context
+        remaining_tokens = max_tokens - token_count
+        if remaining_tokens > 500:  # Only add more if significant space remains
+            for msg in reversed(chat_history):
+                # Skip messages we already included
+                if msg in filtered_messages:
+                    continue
+                    
+                msg_tokens = self.count_tokens(msg.get('content', ''))
+                if token_count + msg_tokens > max_tokens:
+                    break
+                    
+                filtered_messages.insert(0, msg)
+                token_count += msg_tokens
+        
+        return filtered_messages 
