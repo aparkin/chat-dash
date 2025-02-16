@@ -90,6 +90,7 @@ from services import ServiceMessage
 from services import initialize_index_search
 from dash.exceptions import PreventUpdate
 from services import PreviewIdentifier
+from services import ServiceRegistry
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore', category=Warning)
@@ -194,31 +195,9 @@ app.config.suppress_callback_exceptions = True
 #
 ####################################
 
-help_message = """Here's what you can do with this chat interface:
-
-🔍 **SQL Queries**
-- First, select your database using the dropdown at the top of Data Management
-- View database structure in the Database tab under Dataset Info
-- Ask about your database: "Tell me about the connected database"
-- Execute queries:
-  - Simple: Type "execute\\." to run the last query
-  - Specific: "execute query\\_20240315\\_123456\\_original" for a particular query
-  - Note: Valid execution commands will run immediately
-- Convert query results to dataset:
-  - "convert query\\_20240315\\_123456\\_original to dataset"
-
-📚 **Literature Search**
-- Search for scientific literature using natural language:
-  - "What is known about gene regulation?"
-  - "Find papers about CRISPR"
-  - "Search for articles related to metabolic pathways"
-- Refine literature search results:
-  - Use "refine lit_query_XXXXXXXX_XXXXXX with threshold 0.X"
-  - Example: "refine lit_query_20250207_123456 with threshold 0.7"
-  - Higher thresholds (0.7-0.9) give more relevant but fewer results
-  - Lower thresholds (0.3-0.5) give more results but may be less relevant
-- Convert literature results to dataset:
-  - "convert lit_query_XXXXXXXX_XXXXXX to dataset"
+def get_base_help_message() -> str:
+    """Get the base help message for UI and general features."""
+    return """Here's what you can do with this chat interface:
 
 📁 **Dataset Management**
 - Add datasets by:
@@ -228,53 +207,8 @@ help_message = """Here's what you can do with this chat interface:
 - Datasets appear in the dataset browser:
   - Click a dataset to select it for analysis
   - Click the red X to delete a dataset
-- View dataset statistics and profiles
-- Combine SQL query results with uploaded data
-- Get dataset information:
-  - "Tell me about my datasets" - Summary of all available datasets
-  - "Tell me about my dataset" - Information about currently selected dataset
-  - "Tell me about dataset\\_name" - Information about a specific dataset
-
-📊 **Data Visualization**
-First, select a dataset by clicking its name in the dataset browser. Then use these commands:
-
-1. Bubble Plots:
-   ```
-   plot [y_column] vs [x_column]
-   ```
-   Optional parameters:
-   - size=[number or column_name]
-   - color=[color_name or column_name]
-   * For column-based color: numeric columns create continuous scales, categorical columns create discrete legends
-
-2. Heatmaps:
-   ```
-   heatmap columns=[col1,col2,col3] 
-   ```
-   Required:
-   - columns=[col1,col2,...] or columns=regex_pattern
-   
-   Optional:
-   - rows=[row1,row2,...] or rows=regex_pattern fcol=filter_column
-   - standardize=rows|columns
-   - cluster=rows|columns|both
-   - colormap=[valid_plotly_colormap]
-   - transpose=true|false
-
-   Note: When using regex patterns with rows, fcol must specify which column to filter on
-
-3. Geographic Maps:
-   ```
-   map latitude=[lat_column] longitude=[lon_column]
-   ```
-   Required:
-   - latitude=[column_name]
-   - longitude=[column_name]
-   
-   Optional:
-   - size=[number or column_name]
-   - color=[color_name or column_name]
-   * Numeric color columns show colorbar, categorical show legend
+  - You can download datasets by checking the box next to the dataset and clicking the download button.
+- View dataset statistics and profiles in the Statistics tab.
 
 All visualizations feature:
 - Pan: Click and drag
@@ -288,32 +222,25 @@ All visualizations feature:
 - Double-click to reset any visualization view
 - Use the modebar tools for additional controls
 - Export high-quality images using the camera icon
-- Create interactive plots with pan and zoom capabilities:
-  - Bubble Plots: "Plot [column1] vs [column2]"
-    * Optional: Add size=[value/column] color=[value/column]
-    * Interact using mouse wheel to zoom, click and drag to pan
-    * Double-click to reset view
-  - Heatmaps: "Create heatmap columns=[col1,col2,col3]"
-    * Options: rows=[...] standardize=rows/columns cluster=both/rows/columns
-    * standardize normalizes data by row or column
-    * cluster applies hierarchical clustering with optimal leaf ordering
-  - Maps: "Create map latitude=[column1] longitude=[column2]"
-    * Optional: Add size=[value/column] color=[value/column]
-    * Pan by clicking and dragging
-    * Zoom with mouse wheel or pinch gestures
-- All visualizations feature:
-  * Interactive tooltips showing data values
-  * Export options for high-quality images
-  * Modebar with zoom controls and other tools
-  * Auto-scaling and responsive layout
-
-💡 **Tips**
 - Use natural language to ask questions about your data
-- You may need to reference specific columns using \\`backticks\\`
 - Click the dataset cards to switch between datasets
-- Double-click on visualizations to reset the view
-- Use the modebar tools for additional visualization controls
 """
+
+def get_complete_help_message(service_registry: ServiceRegistry) -> str:
+    """Get the complete help message including service documentation.
+    
+    Args:
+        service_registry: The service registry containing all registered services
+        
+    Returns:
+        str: Complete help message with UI help and service documentation
+    """
+    base_help = get_base_help_message()
+    service_help = service_registry.get_help_text()
+    
+    if service_help:
+        return f"{base_help}\n\n🔧 **Available Commands**\n{service_help}"
+    return base_help
 
 ####################################
 #
@@ -1554,7 +1481,7 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
             chat_history.append(current_message)
             chat_history.append({
                 'role': 'assistant',
-                'content': help_message
+                'content': get_complete_help_message(service_registry)
             })
             return (
                 create_chat_elements_batch(chat_history),
@@ -2987,7 +2914,7 @@ def show_help(n_clicks, chat_history):
     # Add help message response
     chat_history.append({
         'role': 'assistant',
-        'content': help_message
+        'content': get_complete_help_message(service_registry)
     })
     
     return dash.no_update, chat_history, create_chat_elements_batch(chat_history)

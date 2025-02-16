@@ -135,4 +135,36 @@ class StoreReportService(ChatService):
                 return f"SQL: {sql[:50]}..." if len(sql) > 50 else f"SQL: {sql}"
             return "Details not available"
         except Exception as e:
-            return f"Error extracting details: {str(e)}" 
+            return f"Error extracting details: {str(e)}"
+
+    def get_help_text(self) -> str:
+        """Get help text for store report service commands."""
+        return """
+📊 **Store Reports**
+- View summary of all data stores: `report on stores`
+  Shows:
+  - Dataset store contents and statistics
+  - Query store contents and execution history
+"""
+
+    def get_llm_prompt_addition(self) -> str:
+        """Get LLM prompt addition for store reporting capabilities."""
+        return """
+Store Report Service Capabilities:
+1. Dataset Store Reporting
+   - Lists all loaded datasets
+   - Shows dataset metadata (rows, columns, source)
+   - Provides dataset statistics
+
+2. Query Store Reporting
+   - Lists successful queries
+   - Shows query execution times
+   - Provides query metadata
+   - Tracks query results
+
+3. Report Format
+   - Markdown formatted tables
+   - Organized by store type
+   - Includes summary statistics
+   - Shows detailed metadata
+""" 

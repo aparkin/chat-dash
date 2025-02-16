@@ -9,6 +9,27 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple, Set
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
+from enum import Enum, auto
+
+class MessageType(Enum):
+    """Enum defining standard message types for service responses.
+    
+    Types:
+    - RESULT: Primary output from a service (search results, analysis output, etc.)
+    - SUMMARY: Secondary analysis or interpretation (LLM summaries, insights, etc.)
+    - ERROR: Error messages and warnings
+    - INFO: General informational messages
+    - DEBUG: Debug information (only shown in development)
+    """
+    RESULT = auto()
+    SUMMARY = auto()
+    ERROR = auto()
+    INFO = auto()
+    DEBUG = auto()
+    
+    def __str__(self) -> str:
+        """Return lowercase string representation for compatibility."""
+        return self.name.lower()
 
 class PreviewIdentifier:
     """Utility class for managing preview identifiers and their prefixes.
@@ -98,10 +119,41 @@ class PreviewIdentifier:
 
 @dataclass
 class ServiceMessage:
-    """Standard format for service-generated chat messages."""
+    """Standard format for service-generated chat messages.
+    
+    Attributes:
+        service: Name of the service generating the message
+        content: Message content (markdown formatted text)
+        message_type: Type of message (see MessageType enum)
+        role: Message role in chat (system, assistant, user)
+        
+    Message Types:
+    - RESULT: Primary output (search results, analysis, etc.)
+    - SUMMARY: Secondary analysis (LLM summaries, insights)
+    - ERROR: Error messages and warnings
+    - INFO: General information
+    - DEBUG: Debug information (development only)
+    
+    Example:
+        ```python
+        # Result message with primary output
+        ServiceMessage(
+            service="search",
+            content="Found 5 matches...",
+            message_type=MessageType.RESULT
+        )
+        
+        # Summary message with LLM analysis
+        ServiceMessage(
+            service="search",
+            content="Analysis shows...",
+            message_type=MessageType.SUMMARY
+        )
+        ```
+    """
     service: str
     content: str
-    message_type: str = 'info'
+    message_type: MessageType = MessageType.INFO
     role: str = 'system'
     
     def __post_init__(self):
@@ -109,17 +161,24 @@ class ServiceMessage:
         if not self.content or not self.content.strip():
             raise ValueError("Service message content cannot be empty")
         self.content = self.content.strip()
+        
+        # Convert string message types to enum
+        if isinstance(self.message_type, str):
+            try:
+                self.message_type = MessageType[self.message_type.upper()]
+            except KeyError:
+                self.message_type = MessageType.INFO
     
     def to_chat_message(self) -> dict:
         """Convert to chat message format."""
         # Format content to explicitly mark it as a service response
-        formatted_content = f"Type: {self.message_type}\n\n{self.content}"
+        formatted_content = f"Type: {str(self.message_type)}\n\n{self.content}"
         
         return {
             'role': self.role,
-            'content': formatted_content.strip(),  # Ensure no leading/trailing whitespace
+            'content': formatted_content.strip(),
             'service': self.service,
-            'type': self.message_type,
+            'type': str(self.message_type),
             'timestamp': datetime.now().isoformat()
         }
 
@@ -175,6 +234,36 @@ class ChatService(ABC):
         """
         return text
 
+    @abstractmethod
+    def get_help_text(self) -> str:
+        """Get a compact help text for this service suitable for the help string in ChatDash.
+        
+        This method should return a concise, markdown-formatted string that:
+        1. Shows all available commands with exact syntax
+        2. Groups related commands together
+        3. Includes required and optional parameters
+        4. Uses consistent formatting with other services
+        
+        Returns:
+            str: Markdown formatted help text for the service
+        """
+        pass
+    
+    @abstractmethod
+    def get_llm_prompt_addition(self) -> str:
+        """Get text to add to the LLM prompt to explain this service's capabilities.
+        
+        This method should return a compact, focused string that:
+        1. Lists exact command patterns the LLM should suggest
+        2. Provides critical details about command usage
+        3. Notes important limitations or requirements
+        4. Avoids redundant or obvious information
+        
+        Returns:
+            str: Detailed service documentation for the LLM prompt
+        """
+        pass
+
 class ServiceRegistry:
     """Registry and dispatcher for chat services."""
     
@@ -195,4 +284,49 @@ class ServiceRegistry:
     
     def get_service(self, name: str) -> Optional[ChatService]:
         """Get a service by name."""
-        return self._services.get(name) 
+        return self._services.get(name)
+
+    def get_help_text(self) -> str:
+        """Get combined help text from all registered services.
+        
+        Orders services in a logical sequence:
+        1. Dataset operations (core data handling)
+        2. Database operations (data querying)
+        3. Literature operations (search and analysis)
+        4. Visualization (data display)
+        5. Index search (unified search)
+        6. Store report (system status)
+        
+        Returns:
+            str: Combined markdown-formatted help text from all services
+        """
+        # Define service order (core services first)
+        service_order = [
+            'dataset',      # Core data handling
+            'database',     # Data querying
+            'literature',   # Literature search
+            'visualization',# Data visualization
+            'index_search', # Unified search
+            'store_report' # System status
+        ]
+        
+        help_texts = []
+        # First add services in specified order
+        for service_name in service_order:
+            service = self._services.get(service_name)
+            if service:
+                service_help = service.get_help_text()
+                if service_help and service_help.strip():
+                    help_texts.append(service_help)
+        
+        # Then add any remaining services alphabetically
+        remaining_services = sorted(
+            (name, service) for name, service in self._services.items()
+            if name not in service_order
+        )
+        for name, service in remaining_services:
+            service_help = service.get_help_text()
+            if service_help and service_help.strip():
+                help_texts.append(service_help)
+        
+        return "\n\n".join(help_texts) 

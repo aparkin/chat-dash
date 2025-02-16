@@ -783,11 +783,7 @@ class GeoMap(VisualizationType):
             raise Exception(f"Error creating map: {str(e)}")
 
 class VisualizationService(ChatService):
-    """Service for handling data visualization requests.
-    
-    This service provides a standardized interface for creating and managing
-    data visualizations in the ChatDash application.
-    """
+    """Service for data visualization."""
     
     def __init__(self):
         super().__init__("visualization")
@@ -924,4 +920,47 @@ class VisualizationService(ChatService):
                     content=f"Error creating visualization: {str(e)}",
                     message_type="error"
                 )],
-            ) 
+            )
+
+    def get_help_text(self) -> str:
+        """Get help text for visualization service commands."""
+        return """
+📈 **Data Visualization**
+- Bubble plots: 
+  - Basic: `plot [y] vs [x]`
+  - With options: `plot [y] vs [x] size=[value] color=[value]`
+- Heatmaps: 
+  - List columns: `heatmap columns=[col1,col2,...]`
+  - Regex pattern: `heatmap columns=pattern`
+  - Row filter: `heatmap columns=[...] rows=pattern fcol=column`
+  - Options: `standardize=rows|columns cluster=both|rows|columns`
+- Maps: 
+  - Basic: `map latitude=[lat] longitude=[lon]`
+  - With options: `size=[value] color=[value]`
+"""
+
+    def get_llm_prompt_addition(self) -> str:
+        """Get LLM prompt addition for visualization capabilities."""
+        return """
+Visualization Commands:
+1. Bubble Plot:
+   "plot [y] vs [x]"
+   "plot x=[col] y=[col]"
+   - Optional: size=[col], color=[col]
+   - Supports numeric columns
+   - Interactive zoom/pan
+
+2. Heatmap:
+   "heatmap columns=[col1,col2,...]" - list specific columns
+   "heatmap columns=pattern" - regex pattern for columns
+   "heatmap columns=[...] rows=pattern fcol=column" - filter rows
+   - Optional: standardize=rows|columns
+   - Optional: cluster=both|rows|columns
+   - Optional: transpose=true|false
+   - Supports numeric data
+
+3. Geographic Map:
+   "map latitude=[lat] longitude=[lon]"
+   - Optional: size=[col], color=[col]
+   - Validates coordinate ranges
+   - Interactive pan/zoom""" 

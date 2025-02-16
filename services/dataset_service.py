@@ -131,7 +131,8 @@ from .base import (
     ChatService, 
     ServiceResponse, 
     ServiceMessage, 
-    PreviewIdentifier
+    PreviewIdentifier,
+    MessageType
 )
 from .llm_service import LLMServiceMixin
 
@@ -774,7 +775,7 @@ class DatasetService(ChatService, LLMServiceMixin):
                 messages=[ServiceMessage(
                     service=self.name,
                     content="No datasets are currently loaded.",
-                    message_type="error",
+                    message_type=MessageType.ERROR,
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
@@ -811,7 +812,7 @@ class DatasetService(ChatService, LLMServiceMixin):
                 messages=[ServiceMessage(
                     service=self.name,
                     content="\n".join(parts),
-                    message_type="info",
+                    message_type=MessageType.RESULT,
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
@@ -824,7 +825,7 @@ class DatasetService(ChatService, LLMServiceMixin):
                     messages=[ServiceMessage(
                         service=self.name,
                         content=f"Dataset '{target}' not found.",
-                        message_type="error",
+                        message_type=MessageType.ERROR,
                         role="assistant"
                     )],
                     state_updates={'chat_input': ''}
@@ -869,7 +870,7 @@ class DatasetService(ChatService, LLMServiceMixin):
                 messages=[ServiceMessage(
                     service=self.name,
                     content="\n".join(parts),
-                    message_type="info",
+                    message_type=MessageType.RESULT,
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
@@ -884,7 +885,7 @@ class DatasetService(ChatService, LLMServiceMixin):
                 messages=[ServiceMessage(
                     service=self.name,
                     content="No Python code blocks found in message.",
-                    message_type="error",
+                    message_type=MessageType.ERROR,
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
@@ -898,14 +899,14 @@ class DatasetService(ChatService, LLMServiceMixin):
                 responses.append(ServiceMessage(
                     service=self.name,
                     content=f"❌ Code validation failed: {error}",
-                    message_type="error",
+                    message_type=MessageType.ERROR,
                     role="assistant"
                 ))
             else:
                 responses.append(ServiceMessage(
                     service=self.name,
                     content="✓ Code validation successful",
-                    message_type="info",
+                    message_type=MessageType.RESULT,
                     role="assistant"
                 ))
         
@@ -947,7 +948,7 @@ class DatasetService(ChatService, LLMServiceMixin):
                         messages.append(ServiceMessage(
                             service=self.name,
                             content="✓ Visualization created and available in visualization tab",
-                            message_type="info",
+                            message_type=MessageType.INFO,
                             role="assistant"
                         ))
 
@@ -968,13 +969,13 @@ class DatasetService(ChatService, LLMServiceMixin):
                             main_result_id,
                             bool(state_updates.get('viz_state'))
                         ),
-                        message_type="info",
+                        message_type=MessageType.RESULT,
                         role="assistant"
                     ),
                     ServiceMessage(
                         service=self.name,
                         content=f"### Analysis Summary\n\n{summary}",
-                        message_type="info",
+                        message_type=MessageType.SUMMARY,
                         role="assistant"
                     )
                 ])
@@ -987,7 +988,7 @@ class DatasetService(ChatService, LLMServiceMixin):
                         main_result_id,
                         bool(state_updates.get('viz_state'))
                     ),
-                    message_type="info",
+                    message_type=MessageType.RESULT,
                     role="assistant"
                 ))
             
@@ -1009,7 +1010,7 @@ class DatasetService(ChatService, LLMServiceMixin):
                 messages=[ServiceMessage(
                     service=self.name,
                     content=error_msg,
-                    message_type="error",
+                    message_type=MessageType.ERROR,
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
@@ -1029,7 +1030,7 @@ class DatasetService(ChatService, LLMServiceMixin):
                 messages=[ServiceMessage(
                     service=self.name,
                     content="Dataset service error in validation: No datasets are currently loaded.",
-                    message_type="error",
+                    message_type=MessageType.ERROR,
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
@@ -1040,7 +1041,7 @@ class DatasetService(ChatService, LLMServiceMixin):
                 messages=[ServiceMessage(
                     service=self.name,
                     content="No dataset is selected. Please select a dataset from the list before running an analysis.",
-                    message_type="error",
+                    message_type=MessageType.ERROR,
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
@@ -1056,7 +1057,7 @@ class DatasetService(ChatService, LLMServiceMixin):
                 messages=[ServiceMessage(
                     service=self.name,
                     content="No Python code block found in recent chat history.",
-                    message_type="error",
+                    message_type=MessageType.ERROR,
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
@@ -1319,7 +1320,7 @@ class DatasetService(ChatService, LLMServiceMixin):
                 messages=[ServiceMessage(
                     service=self.name,
                     content="No dataset ID provided for conversion.",
-                    message_type="error",
+                    message_type=MessageType.ERROR,
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
@@ -1337,7 +1338,7 @@ class DatasetService(ChatService, LLMServiceMixin):
                 messages=[ServiceMessage(
                     service=self.name,
                     content=f"No execution found for dataset ID: {dataset_id}",
-                    message_type="error",
+                    message_type=MessageType.ERROR,
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
@@ -1404,7 +1405,7 @@ class DatasetService(ChatService, LLMServiceMixin):
 - Columns: {', '.join(df.columns)}
 - Source: Code {dataset_id}
 - Type: {stored['metadata'].get('result_type', 'dataframe')}""",
-                    message_type="info",
+                    message_type=MessageType.RESULT,
                     role="assistant"
                 )],
                 store_updates={
@@ -1425,7 +1426,7 @@ class DatasetService(ChatService, LLMServiceMixin):
                 messages=[ServiceMessage(
                     service=self.name,
                     content=f"{self.name} service error: ❌ Dataset conversion failed: {str(e)}",
-                    message_type="error",
+                    message_type=MessageType.ERROR,
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
@@ -1704,7 +1705,7 @@ Please try rephrasing your request or simplifying the analysis."""
                 messages=[ServiceMessage(
                     service=self.name,
                     content="No dataset is selected. Please select a dataset from the list before running an analysis.",
-                    message_type="error",
+                    message_type=MessageType.ERROR,
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
@@ -1722,7 +1723,7 @@ Please try rephrasing your request or simplifying the analysis."""
                     messages=[ServiceMessage(
                         service=self.name,
                         content="Please provide an analysis description.",
-                        message_type="error",
+                        message_type=MessageType.ERROR,
                         role="assistant"
                     )],
                     state_updates={'chat_input': ''}
@@ -1839,7 +1840,7 @@ Please try rephrasing your request or simplifying the analysis."""
                 messages=[ServiceMessage(
                     service=self.name,
                     content=response_content.strip(),
-                    message_type="info",
+                    message_type=MessageType.RESULT,
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
@@ -1850,7 +1851,7 @@ Please try rephrasing your request or simplifying the analysis."""
                 messages=[ServiceMessage(
                     service=self.name,
                     content=f"Error generating analysis code: {str(e)}",
-                    message_type="error",
+                    message_type=MessageType.ERROR,
                     role="assistant"
                 )],
                 state_updates={'chat_input': ''}
@@ -2365,7 +2366,7 @@ Use chain-of-thought reasoning to determine the best way to approach the analysi
                     messages=[ServiceMessage(
                         service=self.name,
                         content="Invalid command",
-                        message_type="error"
+                        message_type=MessageType.ERROR
                     )],
                     state_updates={'chat_input': ''}
                 )
@@ -2375,7 +2376,46 @@ Use chain-of-thought reasoning to determine the best way to approach the analysi
                 messages=[ServiceMessage(
                     service=self.name,
                     content=f"{self.name} service error: {str(e)}",
-                    message_type="error"
+                    message_type=MessageType.ERROR
                 )],
                 state_updates={'chat_input': ''}
             )
+
+    def get_help_text(self) -> str:
+        """Get help text for dataset service commands."""
+        return """
+📈 **Dataset Operations**
+- View dataset information: `tell me about my datasets`
+- Run analysis:
+  - Generate custom analysis: `analysis: [description]`
+    (Generates Python code for analyzing selected dataset)
+  - Execute code: `run datasetCode_[ID]` or `run.`
+- Convert results: `convert dataset_[ID] to dataset`
+"""
+
+    def get_llm_prompt_addition(self) -> str:
+        """Get LLM prompt addition for dataset capabilities."""
+        return """
+Dataset Service Commands:
+1. Information: 
+   "tell me about my datasets"
+
+2. Analysis Generation:
+   "analysis: [description]"
+   - Generates Python code for analyzing a selected dataset
+   - Has access to all loaded datasets via 'datasets' dictionary
+   - Uses pandas, numpy, plotly, scipy, sklearn
+   - Supports visualization
+   - Auto-validates code safety
+
+3. Code Execution:
+   "run datasetCode_[ID]" or "run." for last generated code
+   - Executes specified code
+   - May returns DataFrame results
+   - May return a visualization
+   - Provides previews and summaries
+
+4. Result Conversion:
+   "convert dataset_[ID] to dataset"
+   - Saves analysis results as new dataset
+   - Preserves metadata and execution history"""

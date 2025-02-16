@@ -45,7 +45,8 @@ from .base import (
     ChatService,
     ServiceResponse,
     ServiceMessage,
-    PreviewIdentifier
+    PreviewIdentifier,
+    MessageType
 )
 from .llm_service import LLMServiceMixin
 
@@ -297,7 +298,7 @@ class IndexSearchService(ChatService, LLMServiceMixin):
                 messages=[ServiceMessage(
                     service=self.name,
                     content="No search ID provided for conversion.",
-                    message_type="error"
+                    message_type=MessageType.ERROR
                 )],
                 state_updates={'chat_input': ''}
             )
@@ -311,7 +312,7 @@ class IndexSearchService(ChatService, LLMServiceMixin):
                 messages=[ServiceMessage(
                     service=self.name,
                     content=f"No execution found for search ID: {search_id}",
-                    message_type="error"
+                    message_type=MessageType.ERROR
                 )],
                 state_updates={'chat_input': ''}
             )
@@ -348,7 +349,7 @@ class IndexSearchService(ChatService, LLMServiceMixin):
 - Original query: {stored['query']}
 - Threshold: {stored['threshold']}
 - Sources: {', '.join(stored['metadata']['sources'])}""",
-                    message_type="info"
+                    message_type=MessageType.RESULT
                 )],
                 store_updates={
                     'datasets_store': datasets,  # Update datasets store
@@ -364,7 +365,7 @@ class IndexSearchService(ChatService, LLMServiceMixin):
                 messages=[ServiceMessage(
                     service=self.name,
                     content=f"Index search service error: ❌ Search result conversion failed: {str(e)}",
-                    message_type="error"
+                    message_type=MessageType.ERROR
                 )],
                 state_updates={'chat_input': ''}
             )
@@ -520,7 +521,8 @@ class IndexSearchService(ChatService, LLMServiceMixin):
         messages = [
             ServiceMessage(
                 service="index_search",
-                content=response_content
+                content=response_content,
+                message_type=MessageType.RESULT
             )
         ]
         
@@ -534,7 +536,7 @@ class IndexSearchService(ChatService, LLMServiceMixin):
                         ServiceMessage(
                             service="index_search",
                             content=f"\n### Analysis Summary\n\n{llm_summary}",
-                            message_type="info"
+                            message_type=MessageType.SUMMARY
                         )
                     )
             except Exception as e:
@@ -927,3 +929,29 @@ class IndexSearchService(ChatService, LLMServiceMixin):
                 token_count += msg_tokens
         
         return filtered_messages 
+
+    def get_help_text(self) -> str:
+        """Get help text for index search service commands."""
+        return """
+🔎 **Unified Index Search**
+- Search all sources: `search indices for [text]`
+- Search specific source: `search [source] indices for [text]`
+- With threshold: `search indices with threshold [0.0-1.0] for [text]`
+- Convert to dataset: `convert search_[ID] to dataset`
+"""
+
+    def get_llm_prompt_addition(self) -> str:
+        """Get LLM prompt addition for index search capabilities."""
+        return """
+Index Search Commands:
+1. Search Commands:
+   "search indices for [text]" - search all sources
+   "search [source] indices for [text]" - search specific source
+   "search indices with threshold [0.0-1.0] for [text]"
+   - Available sources: datasets, database
+   - Default threshold: 0.6
+
+2. Result Conversion:
+   "convert search_[ID] to dataset"
+   - Saves search results as dataset
+   - Preserves source and match info""" 

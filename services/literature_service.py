@@ -36,7 +36,8 @@ from .base import (
     ChatService, 
     ServiceResponse, 
     ServiceMessage, 
-    PreviewIdentifier
+    PreviewIdentifier,
+    MessageType
 )
 
 from weaviate_integration import WeaviateConnection
@@ -765,7 +766,7 @@ Current threshold: {threshold}
                 messages=[ServiceMessage(
                     service=self.name,
                     content="No query ID provided for conversion.",
-                    message_type="error"
+                    message_type=MessageType.ERROR
                 )]
             )
         
@@ -778,7 +779,7 @@ Current threshold: {threshold}
                 messages=[ServiceMessage(
                     service=self.name,
                     content=f"No results found for query ID: {query_id}",
-                    message_type="error"
+                    message_type=MessageType.ERROR
                 )]
             )
         
@@ -833,7 +834,7 @@ Current threshold: {threshold}
 - Source: Literature Query {query_id}
 - Original query: {stored_query['query']}
 - Threshold: {stored_query['threshold']}""",
-                    message_type="info"
+                    message_type=MessageType.INFO
                 )],
                 store_updates={
                     'datasets_store': datasets,  # Update datasets store
@@ -848,7 +849,7 @@ Current threshold: {threshold}
                 messages=[ServiceMessage(
                     service=self.name,
                     content=f"Error converting literature results: {str(e)}",
-                    message_type="error"
+                    message_type=MessageType.ERROR
                 )]
             )
     
@@ -888,6 +889,7 @@ Current threshold: {threshold}
             ServiceMessage(
                 service=self.name,
                 content=preview,
+                message_type=MessageType.RESULT,
                 role="assistant"
             )
         ]
@@ -901,7 +903,7 @@ Current threshold: {threshold}
                         ServiceMessage(
                             service=self.name,
                             content=f"\n### Analysis Summary\n\n{llm_summary}",
-                            message_type="info",
+                            message_type=MessageType.SUMMARY,
                             role="assistant"
                         )
                     )
@@ -925,7 +927,7 @@ Current threshold: {threshold}
                 messages=[ServiceMessage(
                     service=self.name,
                     content=f"❌ Query {params['query_id']} not found in history.",
-                    message_type="error",
+                    message_type=MessageType.ERROR,
                     role="assistant"
                 )]
             )
@@ -970,6 +972,7 @@ Current threshold: {threshold}
             ServiceMessage(
                 service=self.name,
                 content=preview,
+                message_type=MessageType.RESULT,
                 role="assistant"
             )
         ]
@@ -983,7 +986,7 @@ Current threshold: {threshold}
                         ServiceMessage(
                             service=self.name,
                             content=f"\n### Analysis Summary\n\n{llm_summary}",
-                            message_type="info",
+                            message_type=MessageType.SUMMARY,
                             role="assistant"
                         )
                     )
@@ -1449,3 +1452,38 @@ IMPORTANT:
             NotImplementedError: This method is not used by LiteratureService
         """
         raise NotImplementedError("LiteratureService does not use LLM for message processing")
+
+    def get_help_text(self) -> str:
+        """Get help text for literature service commands."""
+        return """
+📚 **Literature Search**
+- Search papers: 
+  - `find papers about [topic]`
+  - `what do papers say about [topic]`
+- Refine results:
+  - Adjust threshold: `refine lit_query_[ID] with threshold [0.0-1.0]`
+  - Set threshold: `use threshold [0.0-1.0]`
+- Convert to dataset: `convert lit_query_[ID] to dataset`
+"""
+
+    def get_llm_prompt_addition(self) -> str:
+        """Get LLM prompt addition for literature search capabilities."""
+        return """
+Literature Service Commands:
+1. Search Literature:
+   "find papers about [topic]"
+   "what do papers say about [topic]"
+   - Semantic search across papers
+   - Default threshold: 0.3
+
+2. Result Refinement:
+   "refine lit_query_[ID] with threshold [0.0-1.0]"
+   "use threshold [0.0-1.0]"
+   - Adjust similarity threshold
+   - Higher values: more specific results
+   - Lower values: broader coverage
+
+3. Result Conversion:
+   "convert lit_query_[ID] to dataset"
+   - Saves search results as dataset
+   - Preserves metadata and scores"""
