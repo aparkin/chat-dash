@@ -1943,7 +1943,7 @@ Please try rephrasing your request or simplifying the analysis."""
         return filtered_messages
 
     CODE_TEMPLATE = '''# The line below MUST remain exactly as is - do not modify the ID placeholder
-# Code ID: {ID}
+# Code ID: {{ID}}
 
 # Import statements - DO NOT move these inside the function
 import pandas as pd
@@ -1953,6 +1953,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import scipy.stats as stats
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
+import sklearn
 
 def analyze_data(datasets):
     """Analyze datasets and return results with visualization.
@@ -1997,6 +1998,10 @@ result, viz_data = analyze_data(datasets)'''
         
         print(f"Found {len(validation_history)} validation errors in history")
         
+        # Generate a code ID for this request
+        code_id = PreviewIdentifier.create_id(prefix="datasetCode")
+        print(f"Generated code ID: {code_id}")
+        
         # Create system prompt with context
         system_prompt = f"""You are a data analysis code generator that creates Python code for dataset analysis.
 
@@ -2008,77 +2013,97 @@ TARGET DATASET: '{selected_dataset}'
 DATASET INFORMATION:
 {dataset_info}
 
-ANALYSIS REQUIREMENTS:
-1. Focus on the selected dataset: '{selected_dataset}'
-2. Handle missing data explicitly using .dropna() or .fillna()
-3. Validate data before operations:
-   - Check column existence
-   - Verify non-empty DataFrames/Series before .iloc/.index
-   - Validate categorical operations with value_counts()
-4. Create informative visualizations:
+Code Template (DO NOT MODIFY ANY PART OF THIS TEMPLATE):
+```python
+{self.CODE_TEMPLATE.format(ID=code_id, implementation="# Your implementation here")}
+```
+Recent validation issues to avoid:
+{chr(10).join(validation_history) if validation_history else "No recent validation issues"}
+
+Goal: Produce a robust code to produce a dictionary of informative analysis results in dataframes and/or a rich informative plotly fig. 
+You must produce at least one dataframe or one figure.
+
+CORE CONSTRAINTS (ABSOLUTELY REQUIRED):
+1. Code Structure:
+   - MUST use the provided template WITHOUT ANY MODIFICATIONS
+   - MUST keep the '# Code ID: {code_id}' line EXACTLY as shown (no curly braces)
+   - MUST implement ALL logic inside the analyze_data function
+   - MUST access data using the datasets dictionary and selected dataset:
+      CORRECT:   df = pd.DataFrame(datasets['{selected_dataset}']['df'])
+      INCORRECT: df = ... or using df directly  
+
+2. Results Structure:
+   - MUST return a dictionary named 'result' containing ONLY DataFrames (or empty if only a visualization is produced)
+   - EVERY DataFrame in results MUST:
+     * Be reset using reset_index()
+     * Have descriptive column names
+     * Be properly formatted for reuse
+   Example format (REQUIRED):
+   result = {{
+       'summary_stats': df.describe().reset_index(),
+       'analysis_results': analysis_df.reset_index(),
+       # Add more result DataFrames as needed
+   }}
+
+3. Visualization Structure (if needed):
+   - MUST use EXACTLY this format: 
+   viz_data = {{
+       'type': 'plotly',
+       'figure': fig.to_dict()  # MUST use to_dict()
+   }}
+   - MUST use the plotly library to create the figure
+   - However, it is not necessary to create a figure if not needed. In this case the viz_data should be a dictionary with a 'type' and a 'figure' key set to 'none'.
    - Use clear titles and labels
    - Include error bars where applicable
    - Use appropriate plot types for data types
    - when feasible, use plots as close as possible to what the user asks for
    - ALWAYS convert Plotly figures to dictionary using fig.to_dict()
+   - Set appropriate figure layout:
+    ```python
+    fig.update_layout(
+        title_x=0.5,  # Center title
+        showlegend=True,  # Show legend when multiple traces
+        paper_bgcolor='white',  # White background
+        plot_bgcolor='white'    # White plot area
+    )
+    ```
+    - LEAVE OUT vertical and horizontal space directives when you updating layout or defining the plot or multiplot. 
+    - Do not set the height and width of the figure.
+    - ALWAYS convert Plotly figures to dictionary using fig.to_dict()
+    - If using a multiplot, ENSURE the specs argument matches the type of plots you are making and putting in each column and row.
+        For example: 
+        - spec='xy' for scatter, histogram, and bar charts
+        - spec='heatmap' for heatmap
+        - spec='box' for box and violin
+        - spec='domain' for pie
+        - spec='surface' for surface
+        - spec='chloropleth' for chloropleth
+        - spec='treemap' for treemap
+        - spec='funnel' for funnel
+        - spec='candlestick' for candlestick
+        - spec='contour' for contour
+        - spec='scattergeo' for scattergeo
+    - Include hover information for better interactivity
+    - Set appropriate margins and spacing
+    - For multiple subplots, use descriptive subplot titles 
 
-RESULTS REQUIREMENTS:
-1. The 'result' dictionary MUST contain well-structured DataFrames that:
-   - Have clear, descriptive names (e.g., 'summary_stats', 'correlations', 'aggregated_data')
-   - Are formatted for reuse in further analysis
-   - Include proper column names and indices
-   - Preserve data types appropriately
-   - ALWAYS use reset_index() on any DataFrame before adding to results
-2. Example result structure:
-   ```python
-   result = {{
-       'summary_stats': df.describe().reset_index(),  # Include reset_index() for better reusability
-       'correlations': correlation_matrix.reset_index(),
-       'aggregated_data': grouped_data.reset_index()
-   }}
-   ```
-3. DO NOT return raw statistical results - always wrap them in a DataFrame
-4. Include descriptive statistics when relevant
-5. Format categorical summaries as DataFrames with counts and proportions
-6. ALWAYS ensure each DataFrame in results has meaningful column names
+4. ABSOLUTELY FORBIDDEN Operations: These are security risks and will result in an error. 
+   - eval, exec, compile (code execution)
+   - open, file, os, sys (file/system access)
+   - subprocess, import, __import__ (system/import operations)
+   - map (can be used for code execution)
+   - ANY file operations or system access
+   - ANY dynamic code execution
+   - ANY additional imports beyond pre-imported libraries
 
-VISUALIZATION REQUIREMENTS:
-1. ALWAYS format visualization data exactly as follows:
-   ```python
-   viz_data = {{
-       'type': 'plotly',  # REQUIRED
-       'figure': fig.to_dict()  # REQUIRED - must use to_dict()
-   }}
-   ```
-2. Set appropriate figure layout:
-   ```python
-   fig.update_layout(
-       title_x=0.5,  # Center title
-       showlegend=True,  # Show legend when multiple traces
-       paper_bgcolor='white',  # White background
-       plot_bgcolor='white'    # White plot area
-   )
-   ```
-3. If using a multiplot, ENSURE the specs argument matches the type of plots you are making and putting in each column and row.
-For example: 
-- spec='xy' for scatter, histogram, and bar charts
-- spec='heatmap' for heatmap
-- spec='box' for box and violin
-- spec='domain' for pie
-- spec='surface' for surface
-- spec='chloropleth' for chloropleth
-- spec='treemap' for treemap
-- spec='funnel' for funnel
-- spec='candlestick' for candlestick
-- spec='contour' for contour
-- spec='scattergeo' for scattergeo
-4. DO NOT try and pack too many figures into one visualization. There is finite space for the figure in the chat window so do not make the figure too large or too complex.
-5. DO NOT set the height and width of the figure
-6. LEAVE OUT vertical and horizontal space directives when you updating layout or defining the plot or multiplot. 
-7. Use clear subplot titles and axis labels
-8. Include hover information for better interactivity
-9. Set appropriate margins and spacing
-10. For multiple subplots, use descriptive subplot titles
+ANALYSIS REQUIREMENTS:
+1. Focus on the selected dataset: '{selected_dataset}'
+2. Make sure all code is robust to missing data through proper coercion or handling if necessary.  
+3. Validate data before operations:
+   - Check column existence
+   - Verify non-empty DataFrames/Series before .iloc/.index
+   - Validate categorical operations with value_counts()
+4. If the user has specified non-existent columns do not generate code but help the user correct their request.
 
 DATA VALIDATION REQUIREMENTS:
 1. ONLY use columns that are listed above in the dataset information
@@ -2098,54 +2123,38 @@ AVAILABLE LIBRARIES (pre-imported, DO NOT import others):
 - plotly.subplots (make_subplots): Multiple plots
 - scipy.stats: Statistical functions
 - sklearn.preprocessing: Data preprocessing
+- sklearn
+- CRITICAL- These are preimported and DO NOT import others. You are not allowed to import any other libraries. 
 
-CRITICAL REQUIREMENTS:
-1. You MUST use the exact code template provided below WITHOUT ANY MODIFICATIONS to its structure
-2. You MUST keep the '# Code ID: {{ID}}' line exactly as is - do not change the {{ID}} placeholder
-3. You MUST implement ONLY the analysis logic inside the analyze_data function. You CANNOT define any other functions.
-4. You MUST access data using the datasets dictionary and selected dataset:
-   CORRECT:   df = pd.DataFrame(datasets['{selected_dataset}']['df'])
-   INCORRECT: df = ... or using df directly
-5. You MUST return results in this format:
-   - result: Dict[str, pd.DataFrame] with analysis results
-   - viz_data: Dict with 'type': 'plotly' and 'figure': fig.to_dict()
-6. DO NOT add any imports - they are already included in the template
-7. DO NOT add your own validation code - it's already in the template
-8. ONLY use column names that are listed above in the dataset information
-9. Before using any column, verify it exists in the DataFrame:
-   ```python
-   # Example column validation
-   if 'column_name' not in df.columns:
-       raise ValueError("Required column 'column_name' not found in dataset")
-   ```
-10. NEVER use any of these blocked operations as they are security risks:
-    - eval, exec, compile (code execution)
-    - open, file, os, sys (file/system access)
-    - subprocess, import, __import__ (system/import operations)
-    - map (can be used for code execution)
-    Instead use:
-    - List comprehensions instead of map()
-    - Built-in pandas/numpy functions for data operations
-    - Explicit loops when needed
+RESPONSE FORMAT:
+1. Analysis Plan:
+   - Verify available columns from dataset info
+   - List specific steps to accomplish the task
+   - Identify required operations
 
-Code Template (DO NOT MODIFY ANY PART OF THIS TEMPLATE):
-```python
-{self.CODE_TEMPLATE.format(ID="{{ID}}", implementation="# Your implementation here")}
-```
+2. Implementation:
+   - Complete code block using template
+   - Verify all columns exist in dataset info
+   - Ensure all requirements are met
+   - Confirm results dictionary format
 
-Recent validation issues to avoid:
-{chr(10).join(validation_history) if validation_history else "No recent validation issues"}
+3. Results Explanation:
+   - Describe each DataFrame in results
+   - Explain visualization choices
+   - Note potential insights
 
-Format your response as:
-1. Brief analysis plan addressing the user's request
-2. Code block with implementation (using template EXACTLY as shown)
-3. Expected results explanation including:
-   - Description of each DataFrame in the results
-   - Explanation of the visualization
-   - Potential insights that could be derived
-4. End with a clear "To execute this analysis, type 'run.' in the chat." instruction
+4. Execution Instructions:
+   "To execute this analysis, type 'run.' in the chat."
 
 Use chain-of-thought reasoning to determine the best way to approach the analysis while meeting all the requirements.
+CRITICAL REMINDERS:
+- ONLY use columns listed in dataset info
+- EVERY result value in the results dictionary must be a DataFrame
+- ALL DataFrames must use reset_index()
+- NO raw statistical results
+- NO additional imports
+- EXACT template compliance
+- CORRECT subplot specs for plot types
 """
 
         print("System prompt prepared, length:", len(system_prompt))
@@ -2348,6 +2357,9 @@ Use chain-of-thought reasoning to determine the best way to approach the analysi
     def execute(self, params: dict, context: dict) -> ServiceResponse:
         """Execute dataset service request."""
         try:
+            # Store context for use in _call_llm
+            self.context = context
+
             # Get command type
             command = params.get('command')
             

@@ -372,6 +372,9 @@ class IndexSearchService(ChatService, LLMServiceMixin):
     
     def execute(self, params: dict, context: dict) -> ServiceResponse:
         """Execute the search request."""
+        # Store context for use in _call_llm
+        self.context = context
+
         command = params.get('command')
         
         if command == 'convert':

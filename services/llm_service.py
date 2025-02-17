@@ -71,9 +71,32 @@ from dotenv import load_dotenv
 import tiktoken
 import openai
 import traceback
+from pathlib import Path
 
 # Load environment variables
-load_dotenv()
+# Find the project root directory (where .env is located)
+project_root = Path(__file__).parent.parent
+dotenv_path = project_root / '.env'
+
+# Try to load from .env file
+load_dotenv(dotenv_path=dotenv_path)
+
+# OpenAI Settings
+if False:  # Toggle for development environment
+    CBORG=True
+    OPENAI_BASE_URL = os.getenv('CBORG_BASE_URL', "https://api.cborg.lbl.gov")
+    OPENAI_API_KEY = os.getenv('CBORG_API_KEY', '')  # Must be set in environment
+else:  # Production environment
+    CBORG=False
+    OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1')
+    OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')  # Must be set in environment
+
+print(f"OPENAI_BASE_URL: {OPENAI_BASE_URL}")
+# TODO: why isn't the above getting the right BASE_URL?
+OPENAI_BASE_URL='https://api.openai.com/v1'
+
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY environment variable must be set")
 
 @dataclass
 class LLMConfig:
@@ -130,10 +153,13 @@ class LLMServiceMixin(ABC):
         
         # Use the same OpenAI client configuration as ChatDash
         openai_config = {
-            'api_key': os.getenv('CBORG_API_KEY', ''),
-            'base_url': os.getenv('CBORG_BASE_URL', "https://api.cborg.lbl.gov")
+            'api_key': OPENAI_API_KEY,
+            'base_url': OPENAI_BASE_URL
         }
         self._client = openai.OpenAI(**openai_config)
+        
+        # Initialize context
+        self.context = {}
         
     def _load_llm_config(self) -> LLMConfig:
         """Load LLM configuration from environment variables."""
@@ -203,13 +229,45 @@ class LLMServiceMixin(ABC):
             print("Message roles:", [m["role"] for m in formatted_messages])
             print("Message lengths:", [len(m["content"]) for m in formatted_messages])
             
-            # Call the API using the same pattern as ChatDash
-            response = self._client.chat.completions.create(
-                model=self.llm_config.model_name,
-                messages=formatted_messages,
-                temperature=self.llm_config.temperature,
-                max_tokens=8192  # Same as ChatDash
-            )
+            # Get model from context or config
+            model = self.context.get('model', self.llm_config.model_name)
+            
+            if not CBORG:
+                # Map model names to OpenAI API model IDs
+
+                model_mapping = {   
+                    'anthropic/claude-sonnet': 'o3-mini',  # Map to GPT-4 as closest equivalent
+                    'anthropic/claude-opus': 'o3-mini',
+                    'anthropic/claude-haiku': 'gpt-3.5-turbo',
+                    'openai/gpt-4o': 'gpt-4o',
+                    'openai/gpt-4o-mini': 'gpt-4o-mini',
+                    'openai/o1': 'o1',
+                    'openai/o1-mini': 'o1-mini',
+                    'lbl/cborg-chat:latest': 'gpt-4o',  # Keep as is for CBORG
+                    'lbl/cborg-coder:latest': 'gpt-4o',
+                    'lbl/cborg-deepthought:latest': 'gpt-4o'
+                }   
+                
+                # Map the model name to its API ID, defaulting to gpt-4 if not found
+                model_id = model_mapping.get(model, 'gpt-4')
+                print(f"Using model: {model_id} (mapped from {model})")
+            else:
+                model_id = model
+            
+            # Call the API using the mapped model ID
+            if model_id[0] != 'o':
+                response = self._client.chat.completions.create(
+                    model=model_id,
+                    messages=formatted_messages,
+                    temperature=self.llm_config.temperature,
+                    max_tokens=8192  # Same as ChatDash
+                )
+            else:
+                response = self._client.chat.completions.create(
+                    model=model_id,
+                    messages=formatted_messages,
+                    max_completion_tokens=8192  # Same as ChatDash
+                )
             
             result = response.choices[0].message.content
             if not result or not result.strip():

@@ -350,6 +350,8 @@ class DatabaseService(ChatService, LLMServiceMixin):
             - store_updates: Updates to query store
         """
         try:
+            # Store context for use in _call_llm
+            self.context = context
             # Check database connection
             if not context.get('database_state', {}).get('connected'):
                 return ServiceResponse(
@@ -378,6 +380,8 @@ class DatabaseService(ChatService, LLMServiceMixin):
                 # Execute query
                 try:
                     results, metadata, preview = self._execute_sql_query(query_text, db_path)
+                    
+                    # TODO: We may need to do column type coercion here. 
                     
                     # Generate query ID
                     query_id = PreviewIdentifier.create_id(prefix="query")
@@ -1447,8 +1451,8 @@ SQL Query Guidelines:
    - IMPORTANT: SQL queries can ONLY be run against the connected database tables listed above
 
 2. Query Response Format:
-   Always structure responses as follows:
-   a) Primary Query (Original):
+   IMPORTANT: You MUST follow this EXACT format for ALL SQL queries:
+   a) Primary Query:
    ```sql
    -- Purpose: Clear description of query goal
    -- Tables: List of tables used
@@ -1462,6 +1466,13 @@ SQL Query Guidelines:
    -- Assumptions: Any important assumptions
    SELECT ... -- Alternative SQL
    ```
+   CRITICAL FORMATTING RULES:
+   1. ALWAYS include the ```sql marker at the start of EVERY SQL block
+   2. ALWAYS include ALL three comment lines (Purpose, Tables, Assumptions)
+   3. NEVER skip or combine the comment lines
+   4. NEVER include Query IDs - they will be added automatically
+   5. ALWAYS put a space after each -- in comments
+   6. ALWAYS end SQL blocks with ```
    Note: Query IDs will be added automatically by the system. Do not include them in your response.
 
 3. Query Best Practices:
@@ -1612,7 +1623,7 @@ SQL Query Guidelines:
    - IMPORTANT: SQL queries can ONLY be run against the connected database tables listed above
 
 2. Query Response Format:
-   Always structure responses as follows:
+   IMPORTANT: You MUST follow this EXACT format for ALL SQL queries:
    a) Primary Query:
    ```sql
    -- Purpose: Clear description of query goal
@@ -1627,7 +1638,13 @@ SQL Query Guidelines:
    -- Assumptions: Any important assumptions
    SELECT ... -- Alternative SQL
    ```
-   Note: Query IDs will be added automatically by the system. Do not include them in your response.
+   CRITICAL FORMATTING RULES:
+   1. ALWAYS include the ```sql marker at the start of EVERY SQL block
+   2. ALWAYS include ALL three comment lines (Purpose, Tables, Assumptions)
+   3. NEVER skip or combine the comment lines
+   4. NEVER include Query IDs - they will be added automatically
+   5. ALWAYS put a space after each -- in comments
+   6. ALWAYS end SQL blocks with ```
 
 3. Query Best Practices:
    - Use explicit column names instead of SELECT *

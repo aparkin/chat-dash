@@ -729,6 +729,9 @@ Current threshold: {threshold}
             - Store updates if needed
             - State updates if needed
         """
+        # Store context for use in _call_llm
+        self.context = context
+
         if params['type'] == 'conversion':
             return self._handle_conversion(params, context)
         elif params['type'] == 'refinement':

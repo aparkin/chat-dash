@@ -19,6 +19,7 @@ from .index_search_service import IndexSearchService
 from .visualization_service import VisualizationService
 from .database_service import DatabaseService
 from .dataset_service import DatasetService
+from .chat_llm_service import ChatLLMService
 
 # Create global service registry
 registry = ServiceRegistry()
@@ -36,6 +37,7 @@ registry.register(visualization_service)
 registry.register(database_service)
 registry.register(dataset_service)
 registry.register(literature_service)
+registry.register(ChatLLMService())
 
 def initialize_index_search(text_searcher: Any, text_searcher_db: Any) -> None:
     """Initialize the index search service with available searchers.
@@ -55,6 +57,9 @@ def initialize_index_search(text_searcher: Any, text_searcher_db: Any) -> None:
     }
     index_search_service = IndexSearchService(index_sources=index_sources)
     registry.register(index_search_service)
+
+# Export for convenience
+service_registry = registry
 
 __all__ = [
     'PreviewIdentifier',

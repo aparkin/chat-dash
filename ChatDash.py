@@ -109,7 +109,7 @@ dotenv_path = project_root / '.env'
 load_dotenv(dotenv_path=dotenv_path)
 
 # OpenAI Settings
-if True:  # Toggle for development environment
+if False:  # Toggle for development environment
     OPENAI_BASE_URL = os.getenv('CBORG_BASE_URL', "https://api.cborg.lbl.gov")
     OPENAI_API_KEY = os.getenv('CBORG_API_KEY', '')  # Must be set in environment
 else:  # Production environment
@@ -127,7 +127,7 @@ if not OPENAI_API_KEY:
 
 # Available models
 AVAILABLE_MODELS = [
-    "lbl/cborg-chat:latest", "lbl/cborg-coder:latest", 
+    "lbl/cborg-chat:latest", "lbl/cborg-coder:latest", "lbl/cborg-deepthought:latest",
     "lbl/llama", "openai/gpt-4o", "openai/gpt-4o-mini",
     "openai/o1", "openai/o1-mini", "anthropic/claude-haiku",
     "anthropic/claude-sonnet", "anthropic/claude-opus", "google/gemini-pro",
@@ -165,6 +165,16 @@ CHAT_STYLES = {
         'borderLeft': '4px solid #dc3545',
         'maxWidth': '75%',
         'color': '#dc3545'
+    },
+    'chat_llm': {  # Add ChatLLM-specific styling
+        'backgroundColor': '#f8f9fa',  # Light background
+        'border': '1px solid #e9ecef',  # Subtle border
+        'borderLeft': '4px solid #28a745',  # Green accent for main chat service
+        'maxWidth': '75%',  # Standard width
+        'padding': '15px',  # More padding for readability
+        'fontFamily': 'system-ui',  # System font for better readability
+        'lineHeight': '1.5',  # Improved line height
+        'color': '#212529'  # Dark gray text for contrast
     }
 }
 
@@ -778,12 +788,16 @@ def create_chat_element(message: dict) -> dbc.Card:
     """
     # Determine style based on message properties
     if 'service' in message:
-        # Service message styling
-        if message.get('type') == 'error':
-            style = CHAT_STYLES['service_error']
+        # Special handling for ChatLLM service
+        if message['service'] == 'chat_llm':
+            style = CHAT_STYLES['chat_llm']
         else:
-            style = CHAT_STYLES['service']
-            
+            # Service message styling
+            if message.get('type') == 'error':
+                style = CHAT_STYLES['service_error']
+            else:
+                style = CHAT_STYLES['service']
+                
         # Add service indicator if not an error
         if message.get('type') != 'error':
             header = html.Div(
@@ -796,7 +810,7 @@ def create_chat_element(message: dict) -> dbc.Card:
             )
         else:
             header = None
-            
+        
         # Always render service content as markdown
         content = dcc.Markdown(
             message['content'],
@@ -1472,6 +1486,13 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
         if not input_value:
             return (dash.no_update,) * 9  # Updated for all outputs
             
+        # Initialize return values
+        chat_input_value = dash.no_update
+        active_tab = dash.no_update
+        viz_state = dash.no_update
+        chat_loading = ""
+        dataset_list = dash.no_update
+            
         chat_history = chat_history or []
         current_message = {'role': 'user', 'content': input_value.strip()}
         context = get_relevant_context(current_message, chat_history)
@@ -1494,12 +1515,18 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                 dash.no_update,  # No datasets update needed
                 dash.no_update   # No dataset list update needed
             )
-        
-        # Add service detection wrapper
-        handlers = service_registry.detect_handlers(input_value)
-        
+
         # Add message to chat history first
         chat_history.append(current_message)
+
+        # Initialize store updates
+        store_updates = {
+            'successful_queries_store': successful_queries,
+            'datasets_store': datasets
+        }
+        
+        # Detect and execute service handlers
+        handlers = service_registry.detect_handlers(input_value)
         
         if len(handlers) > 1:
             # Multiple services detected - add warning message
@@ -1528,7 +1555,7 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                     'selected_dataset': selected_dataset,
                     'database_state': database_state,
                     'database_structure': database_structure_store,
-                    'chat_history': chat_history,  # Add chat history to context
+                    'chat_history': chat_history,
                     'timestamp': datetime.now().isoformat()
                 }
                 
@@ -1539,89 +1566,26 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                 for msg in response.messages:
                     chat_history.append(msg.to_chat_message())
                 
-                # Create system message with context for LLM
-                system_message = create_system_message(
-                    dataset_info=[{
-                        'name': name,
-                        'rows': len(pd.DataFrame(data['df'])),
-                        'columns': list(pd.DataFrame(data['df']).columns),
-                        'selected': name == selected_dataset
-                    } for name, data in datasets.items()] if datasets else [],
-                    database_structure=database_structure_store
-                )
-                
-                # Get LLM response
-                messages = get_context_messages(system_message, chat_history)
-                try:
-                    llm_response = client.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        temperature=0.4,
-                        max_tokens=8192
-                    )
-                except Exception as e:
-                    print(f"Error in LLM response: {str(e)}")
-                    raise e
-
-                # Extract content from response
-                ai_response = llm_response.choices[0].message.content
-
-                print(f"********* LLM response: {ai_response}")
-                length_sum=0
-                for msg in messages:
-                    length_sum += count_tokens(msg.get('content', ''))
-                    if msg.get('content', '')=='':
-                        print(f"    ********* Message: {msg}")
-                print(f"    ********* Length sum: {length_sum}")
-                # Process SQL blocks if present
-                if '```sql' in ai_response.lower():
-                    ai_response = add_query_ids_to_response(ai_response)
-                
-                # Add LLM response to chat
-                chat_history.append({
-                    'role': 'assistant',
-                    'content': ai_response
-                })
-                
-                # Update stores if needed
+                # Update stores immediately after service execution
                 if response.store_updates:
-                    # Update each store separately
                     if 'successful_queries_store' in response.store_updates:
-                        # Merge updates instead of replacing
                         successful_queries = {
                             **successful_queries,
                             **response.store_updates['successful_queries_store']
                         }
                     if 'datasets_store' in response.store_updates:
-                        # Merge updates instead of replacing
                         datasets = {
                             **datasets,
                             **response.store_updates['datasets_store']
                         }
                         # Update dataset list when datasets store changes
                         dataset_list = [create_dataset_card(name, data) for name, data in datasets.items()]
-                    else:
-                        dataset_list = dash.no_update
-                else:
-                    dataset_list = dash.no_update
                 
-                # Get chat input value from state updates or default to dash.no_update
-                # TODO: Not sure why I am doing this right now. 
+                # Update return values from service response
                 chat_input_value = response.state_updates.get('chat_input', dash.no_update)
-                
-                # Return with any state updates
-                return (
-                    create_chat_elements_batch(chat_history),
-                    chat_input_value,  # Use service's chat input value
-                    chat_history,
-                    response.state_updates.get('active_tab', dash.no_update),
-                    response.state_updates.get('viz_state', dash.no_update),
-                    "",
-                    successful_queries,  # Return the updated queries store
-                    datasets,  # Return the updated datasets store
-                    dataset_list  # Return the updated dataset list
-                )
-                
+                active_tab = response.state_updates.get('active_tab', dash.no_update)
+                viz_state = response.state_updates.get('viz_state', dash.no_update)
+
             except Exception as e:
                 print(f"Service execution error in handle_chat_message: {str(e)}")
 
@@ -1630,69 +1594,77 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                     content=f"Error executing service: {str(e)}",
                     message_type="error"
                 )
-
+                
                 chat_history.append(error_msg.to_chat_message())
 
-                return (
-                    create_chat_elements_batch(chat_history),
-                    dash.no_update,  # Changed from '' to dash.no_update
-                    chat_history,
-                    dash.no_update,
-                    dash.no_update,
-                    "",
-                    successful_queries,
-                    dash.no_update,
-                    dash.no_update
+        if False:
+            # Create system message with all available context
+            system_message = create_system_message(
+                dataset_info=[{
+                    'name': name,
+                    'rows': len(pd.DataFrame(data['df'])),
+                    'columns': list(pd.DataFrame(data['df']).columns),
+                    'selected': name == selected_dataset
+                } for name, data in datasets.items()] if datasets else [],
+                database_structure=database_structure_store
+            )
+
+            # Use full chat history for context
+            messages = get_context_messages(system_message, chat_history)
+            
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.4,
+                max_tokens=8192
+            )
+            
+            ai_response = response.choices[0].message.content
+            
+            # Process SQL blocks if present
+            if '```sql' in ai_response.lower():
+                ai_response = add_query_ids_to_response(ai_response)
+            
+            chat_history.append({'role': 'assistant', 'content': ai_response})
+        
+        # Test ChatLLM service in parallel
+        try:
+            chat_llm = service_registry.get_service("chat_llm")
+            if chat_llm:
+                llm_response = chat_llm.execute(
+                    {'message': input_value},
+                    {
+                        'chat_history': chat_history,
+                        'datasets_store': datasets,
+                        'selected_dataset': selected_dataset,
+                        'database_state': database_state,
+                        'database_structure': database_structure_store,
+                        'model': model  # Add the selected model to context
+                    }
                 )
-
-        print('No services detected')            
-        chat_history.append(current_message)
-        
-        # Create system message with all available context
-        system_message = create_system_message(
-            dataset_info=[{
-                'name': name,
-                'rows': len(pd.DataFrame(data['df'])),
-                'columns': list(pd.DataFrame(data['df']).columns),
-                'selected': name == selected_dataset
-            } for name, data in datasets.items()] if datasets else [],
-            database_structure=database_structure_store
-        )
-
-        # Use full chat history for context
-        messages = get_context_messages(system_message, chat_history)  # Changed from context to chat_history
-        
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.4,
-            max_tokens=8192
-        )
-        
-        ai_response = response.choices[0].message.content
-        
-        # Process SQL blocks if present
-        if '```sql' in ai_response.lower():
-            ai_response = add_query_ids_to_response(ai_response)
-        
-        chat_history.append({'role': 'assistant', 'content': ai_response})
+                # Add response to chat history without test marker
+                for msg in llm_response.messages:
+                    chat_history.append(msg.to_chat_message())
+        except Exception as e:
+            print(f"ChatLLM service test error: {str(e)}")
+            print(traceback.format_exc())
         
         return (
             create_chat_elements_batch(chat_history),
-            dash.no_update,  # Changed from '' to dash.no_update
+            chat_input_value,
             chat_history,
-            dash.no_update,
-            dash.no_update,
-            "",
-            successful_queries,  # Add the store to all returns
-            dash.no_update,
-            dash.no_update
+            active_tab,
+            viz_state,
+            chat_loading,
+            successful_queries,
+            datasets,
+            dataset_list
         )
-        
+
     except Exception as e:
         print(f"Error in handle_chat_message: {str(e)}")
         print(traceback.format_exc())
-        return (dash.no_update,) * 9  # Updated for all outputs
+        return (dash.no_update,) * 9
 
 ####################################
 #
