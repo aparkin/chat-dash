@@ -96,6 +96,7 @@ from tqdm import tqdm
 import tiktoken
 from dotenv import load_dotenv
 from pathlib import Path
+import atexit  # Added for cleanup
 
 # Find the project root directory (where .env is located)
 project_root = Path(__file__).parent.parent
@@ -888,7 +889,29 @@ def create_schema(client, base_url: str):
                 
         # Optional metadata about reduction
         Property(name="content_metadata", data_type=DataType.OBJECT,
-                description="Metadata about content reduction")
+                description="Metadata about content reduction",
+                nested_properties=[
+                    Property(
+                        name="was_reduced",
+                        data_type=DataType.BOOLEAN,
+                        description="Whether the content was reduced"
+                    ),
+                    Property(
+                        name="original_tokens",
+                        data_type=DataType.INT,
+                        description="Original token count before reduction"
+                    ),
+                    Property(
+                        name="final_tokens",
+                        data_type=DataType.INT,
+                        description="Final token count after reduction"
+                    ),
+                    Property(
+                        name="reduction_ratio",
+                        data_type=DataType.NUMBER,
+                        description="Ratio of final to original tokens"
+                    )
+                ])
     ]
     
     client.collections.create(
@@ -1566,7 +1589,7 @@ def main():
     Database Management:
         --info: Show collection statistics and content samples
         --cleanup: Remove existing collections (with confirmation)
-        --force: Skip confirmation prompts during cleanup
+        --force: Skip confirmation prompts
         --show-models: Display available OpenAI embedding models
     
     Data Operations:
@@ -1587,7 +1610,6 @@ def main():
     
     import argparse
     from contextlib import contextmanager
-    import atexit  # Add this import
     
     parser = argparse.ArgumentParser(description='Weaviate Database Management')
     parser.add_argument('--info', action='store_true', 
@@ -1660,9 +1682,15 @@ def main():
     # File handler gets everything
     file_handler = logging.FileHandler('weaviate_import.log')
     
-    # Replace handlers
+    # Replace handlers with proper cleanup
     root_logger = logging.getLogger()
-    root_logger.handlers = [console_handler, file_handler]
+    # First remove any existing handlers
+    for handler in root_logger.handlers[:]:
+        handler.close()
+        root_logger.removeHandler(handler)
+    # Then add our new handlers
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
     
     if args.show_models:
         check_available_models()

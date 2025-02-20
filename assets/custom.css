@@ -91,6 +91,20 @@
     background-color: white !important;
 }
 
+/* Additional ERD-specific overrides */
+.mermaid .er.relationshipLabelBox {
+    fill: white !important;
+    stroke: none !important;
+}
+
+.mermaid .er.relationshipLine {
+    stroke: #333 !important;
+}
+
+.mermaid .er.relationshipLabel {
+    fill: black !important;
+}
+
 /* Container styling for ERD diagrams */
 .database-erd-container,
 .weaviate-erd-container {
@@ -121,4 +135,9 @@
 
 .mr-2 {
     margin-right: 0.5rem;
+}
+
+/* Add script tag for custom JavaScript */
+script {
+    display: none;
 }

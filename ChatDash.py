@@ -18,7 +18,7 @@ Usage Instructions:
 
 3. Chat Interface:
    - Type messages in the text area
-   - Press Enter to send (Shift+Enter for new line)
+   - Click 'Send' to submit messages
    - Click dataset names to auto-generate queries
    - Use "tell me about" queries for dataset exploration
 
@@ -40,9 +40,6 @@ Usage Instructions:
      * Real-time connection status
      * Collection availability monitoring
      * Detailed schema visualization
-
-Known Limitations:
-- Enter key to send messages is not currently supported due to Dash callback restrictions
 
 Note: All callbacks must remain above the if __name__ == '__main__' block
 """
@@ -113,7 +110,7 @@ if False:  # Toggle for development environment
     OPENAI_BASE_URL = os.getenv('CBORG_BASE_URL', "https://api.cborg.lbl.gov")
     OPENAI_API_KEY = os.getenv('CBORG_API_KEY', '')  # Must be set in environment
 else:  # Production environment
-    OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL', 'https://api.openai.com')
+    OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1')
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')  # Must be set in environment
 
 # Configuration Constants
@@ -1351,7 +1348,7 @@ app.layout = html.Div([
                                 'height': '100px',
                                 'padding': '10px'
                             },
-                            placeholder="Type your message here...",
+                            placeholder="Type your message here..."
                         ),
                     ], width=10),
                     dbc.Col([
@@ -1446,56 +1443,30 @@ def validate_dataset(df: pd.DataFrame, filename: str) -> tuple[bool, str]:
 def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, selected_dataset, database_state, database_structure_store, successful_queries):
     """Process chat messages and handle various command types."""
 
-    # Smart context selection
-    def get_relevant_context(current_msg: dict, history: list, max_context: int = 6) -> list:
-        """Select relevant context messages, preserving order and relationships."""
-        context = []
-        # Always include the current message
-        context.append(current_msg)
-        
-        # Look backwards through history for relevant messages
-        for msg in reversed(history[:-1]):  # Exclude current message
-            if len(context) >= max_context:
-                break
-                
-            # Check relevance based on content
-            content = msg['content'].lower()
-            current_content = current_msg['content'].lower()
-            
-            # Always include the immediate previous message
-            if len(context) == 1:
-                context.insert(0, msg)
-                continue
-            
-            # Include messages with SQL blocks
-            if '```sql' in content:
-                context.insert(0, msg)
-                continue
-                
-            # Include messages that seem related by content
-            # Look for shared significant terms (excluding common words)
-            current_terms = set(re.findall(r'\b\w+\b', current_content))
-            msg_terms = set(re.findall(r'\b\w+\b', content))
-            shared_terms = current_terms & msg_terms
-            if len(shared_terms) >= 2:  # At least 2 significant shared terms
-                context.insert(0, msg)
-                
-        return context
+    # Initialize return values
+    chat_input_value = dash.no_update
+    active_tab = dash.no_update
+    viz_state = dash.no_update
+    chat_loading = ""
+    dataset_list = dash.no_update
+    
+    # Check for empty input early and return no-update for all outputs
+    if not input_value or not input_value.strip():
+        return (
+            dash.no_update,  # chat-history
+            dash.no_update,  # chat-input
+            dash.no_update,  # chat-store
+            dash.no_update,  # dataset-tabs
+            dash.no_update,  # viz-state-store
+            dash.no_update,  # chat-loading-output
+            dash.no_update,  # successful-queries-store
+            dash.no_update,  # datasets-store
+            dash.no_update   # dataset-list
+        )
 
     try:
-        if not input_value:
-            return (dash.no_update,) * 9  # Updated for all outputs
-            
-        # Initialize return values
-        chat_input_value = dash.no_update
-        active_tab = dash.no_update
-        viz_state = dash.no_update
-        chat_loading = ""
-        dataset_list = dash.no_update
-            
         chat_history = chat_history or []
         current_message = {'role': 'user', 'content': input_value.strip()}
-        context = get_relevant_context(current_message, chat_history)
 
         # Handle help request
         if input_value.lower().strip() in ["help", "help me", "what can i do?", "what can i do", "what can you do?", "what can you do"]:
@@ -1510,10 +1481,10 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                 chat_history,
                 dash.no_update,
                 dash.no_update,
-                "",
-                dash.no_update,  # No store update needed
-                dash.no_update,  # No datasets update needed
-                dash.no_update   # No dataset list update needed
+                dash.no_update,
+                dash.no_update,
+                dash.no_update,
+                dash.no_update
             )
 
         # Add message to chat history first
@@ -2891,41 +2862,6 @@ def show_help(n_clicks, chat_history):
     
     return dash.no_update, chat_history, create_chat_elements_batch(chat_history)
 
-####################################
-#
-# Enter Key Handler
-#
-####################################
-
-# Enter key handler - Known limitation: Enter key does not trigger message send
-# This is due to Dash callback chain restrictions. Users must use the Send button.
-app.clientside_callback(
-    """
-    function(n_clicks, value) {
-        if (!window.enterListenerAdded) {
-            const textarea = document.getElementById('chat-input');
-            if (textarea) {
-                textarea.addEventListener('keydown', function(e) {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        const sendButton = document.getElementById('send-button');
-                        if (sendButton) {
-                            sendButton.click();
-                        }
-                    }
-                });
-                window.enterListenerAdded = true;
-            }
-        }
-        return window.dash_clientside.no_update;
-    }
-    """,
-    Output('chat-input', 'n_clicks', allow_duplicate=True),
-    [Input('chat-input', 'n_clicks'),
-     State('chat-input', 'value')],
-    prevent_initial_call='initial_duplicate'
-)
-
 def is_dataset_query(message: str) -> bool:
     """Check if the message is asking about a dataset."""
     query_patterns = [
@@ -3365,26 +3301,21 @@ def update_weaviate_views(weaviate_state, active_tab):
                             "primaryBorderColor": "#555555",
                             "lineColor": "#555555",
                             "textColor": "#000000",
-                            # Add specific ERD theme variables
                             "entityBkgColor": "#ffffff",
                             "entityBorder": "#555555",
                             "labelBackground": "#ffffff",
                             "labelBorder": "#555555",
                             "nodeBkg": "#ffffff",
-                            # Class colors
                             "classText": "#000000",
                             "mainBkg": "#ffffff",
                             "titleColor": "#000000",
-                            # Relationship colors
                             "edgeLabelBackground": "#ffffff",
                             "clusterBkg": "#ffffff",
                             "defaultLinkColor": "#555555",
-                            # Additional diagram elements
                             "tertiaryColor": "#ffffff",
                             "noteTextColor": "#000000",
                             "noteBkgColor": "#ffffff",
                             "noteBorderColor": "#555555",
-                            # ERD-specific overrides
                             "erd": {
                                 "entityFill": "#ffffff",
                                 "entityBorder": "#333333",
