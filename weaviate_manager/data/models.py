@@ -27,7 +27,27 @@ efficient data loading and validation.
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 from weaviate.util import generate_uuid5
-import uuid
+from datetime import datetime
+
+def generate_stable_uuid(prefix: str, *components: str) -> str:
+    """Generate a stable UUID using prefix and components.
+    
+    Args:
+        prefix: String prefix identifying the type of object
+        components: Additional strings to use in UUID generation
+        
+    Returns:
+        str: Generated UUID that will be stable for the same inputs
+    """
+    # Filter out None or empty strings
+    valid_components = [str(c) for c in components if c]
+    if not valid_components:
+        # If no valid components, use timestamp to ensure uniqueness
+        valid_components = [datetime.utcnow().isoformat()]
+    
+    # Combine prefix with filtered components
+    key = f"{prefix}|{'|'.join(valid_components)}"
+    return generate_uuid5(key)
 
 @dataclass
 class Article:
@@ -79,7 +99,9 @@ class Article:
     uuid: Optional[str] = None
     
     def __post_init__(self):
-        """Initialize cross-reference sets if not provided."""
+        """Initialize cross-reference sets and UUID if not provided."""
+        if not self.uuid:
+            self.uuid = generate_stable_uuid("article", self.filename)
         if not self.authors:
             self.authors = set()
         if not self.references:
@@ -117,7 +139,9 @@ class Author:
     uuid: Optional[str] = None
     
     def __post_init__(self):
-        """Initialize cross-reference sets if not provided."""
+        """Initialize cross-reference sets and UUID if not provided."""
+        if not self.uuid:
+            self.uuid = generate_stable_uuid("author", self.canonical_name, self.email)
         if not self.articles:
             self.articles = set()
         if not self.authored_references:
@@ -159,7 +183,9 @@ class Reference:
     uuid: Optional[str] = None
     
     def __post_init__(self):
-        """Initialize cross-reference sets if not provided."""
+        """Initialize cross-reference sets and UUID if not provided."""
+        if not self.uuid:
+            self.uuid = generate_stable_uuid("reference", self.raw_reference)
         if not self.authors:
             self.authors = set()
         if not self.citing_articles:
@@ -191,7 +217,9 @@ class NamedEntity:
     uuid: Optional[str] = None
     
     def __post_init__(self):
-        """Initialize cross-reference sets if not provided."""
+        """Initialize cross-reference sets and UUID if not provided."""
+        if not self.uuid:
+            self.uuid = generate_stable_uuid("entity", self.name, self.type)
         if not self.articles:
             self.articles = set()
         if not self.ner_scores:
@@ -222,7 +250,7 @@ class NERArticleScore:
     def __post_init__(self):
         """Generate UUID if not provided."""
         if not self.uuid:
-            self.uuid = str(uuid.uuid4())
+            self.uuid = generate_stable_uuid("score", self.article_uuid, self.entity_uuid)
 
 @dataclass
 class CitationContext:
@@ -251,7 +279,7 @@ class CitationContext:
     def __post_init__(self):
         """Generate UUID if not provided."""
         if not self.uuid:
-            self.uuid = str(uuid.uuid4())
+            self.uuid = generate_stable_uuid("context", self.article_uuid, self.reference_uuid, self.section)
 
 @dataclass
 class NameVariant:
@@ -276,4 +304,4 @@ class NameVariant:
     def __post_init__(self):
         """Generate UUID if not provided."""
         if not self.uuid:
-            self.uuid = str(uuid.uuid4()) 
+            self.uuid = generate_stable_uuid("variant", self.author_uuid, self.name) 

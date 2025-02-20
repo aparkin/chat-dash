@@ -10,6 +10,23 @@ with robust handling of:
 - UUID consistency across imports
 - Cross-reference management between entities
 
+Token Management Features:
+- Per-field token counting and compression
+- Total token limit enforcement across all fields
+- Intelligent compression preserving important content
+- Configurable safety margins for token limits
+- Progressive compression based on content importance
+
+Compression Strategy:
+1. Individual field compression when exceeding per-field limits
+2. Total token calculation across all fields
+3. Additional compression if total exceeds safe limit
+4. Content preservation based on:
+   - Scientific term importance
+   - Position in text (favoring first/last paragraphs)
+   - Numerical content density
+   - Citation presence
+
 The import process is designed to be resilient and informative, with comprehensive
 logging and progress reporting at each stage.
 """
@@ -21,6 +38,7 @@ import tiktoken
 import json
 import random
 from collections import defaultdict
+import time
 
 import weaviate
 from ..data.loader import LiteratureDataManager
@@ -37,13 +55,18 @@ from ..config.settings import (
     IMPORTANCE_WEIGHTS,
     IMPORTANCE_KEY_TERMS,
     IMPORTANCE_COMPARISON_TERMS,
-    MODEL_TOKEN_LIMITS
+    MODEL_TOKEN_LIMITS,
+    TOKEN_SAFETY_MARGIN
 )
 from weaviate.util import generate_uuid5
 from tqdm import tqdm
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 from ..utils import log_progress
 from weaviate.collections.classes.grpc import QueryReference
+from weaviate.classes.query import Filter
+
+# Configure logging
+logger = logging.getLogger('weaviate_manager.importer')
 
 class WeaviateImporter:
     """
@@ -56,6 +79,20 @@ class WeaviateImporter:
     - Detailed progress tracking and statistics
     - UUID consistency management
     - Cross-reference integrity maintenance
+    
+    Token Management:
+    - Uses cl100k_base tokenizer (same as text-embedding-3-large)
+    - Enforces per-field and total token limits
+    - Applies progressive compression based on content importance
+    - Maintains configurable safety margins
+    - Provides detailed token statistics and logging
+    
+    Compression Features:
+    - Intelligent content selection based on scientific importance
+    - Position-aware preservation (favors start/end)
+    - Numerical content density consideration
+    - Citation preservation
+    - Configurable compression ratios
     
     The import process occurs in two phases:
     1. Primary Entity Import:
@@ -82,8 +119,19 @@ class WeaviateImporter:
     def __init__(self, data_manager: LiteratureDataManager, client: weaviate.Client, suppress_initial_logging: bool = False):
         """Initialize the importer with a data manager and client."""
         self.data_manager = data_manager
-        self.client = client
         self.suppress_initial_logging = suppress_initial_logging
+        
+        # Validate client connection before proceeding
+        try:
+            meta = client.get_meta()
+            if not self.suppress_initial_logging:
+                logger.info(f"Connected to Weaviate version: {meta.get('version', 'unknown')}")
+            self.client = client
+        except Exception as e:
+            error_msg = f"Failed to validate Weaviate connection: {str(e)}"
+            if hasattr(e, 'response'):
+                error_msg += f"\nResponse: {e.response.content if hasattr(e.response, 'content') else e.response}"
+            raise ConnectionError(error_msg) from e
         
         # Initialize tokenizer for text processing
         self._tokenizer = tiktoken.get_encoding("cl100k_base")
@@ -100,7 +148,7 @@ class WeaviateImporter:
         }
         
         # Map collection names to data manager attributes
-        DATA_MANAGER_ATTRS = {
+        self.DATA_MANAGER_ATTRS = {
             "Article": "articles",
             "Author": "authors",
             "Reference": "references",
@@ -113,7 +161,7 @@ class WeaviateImporter:
         # Track import statistics with all required fields
         self.import_stats = {
             collection: {
-                "total": len(getattr(self.data_manager, DATA_MANAGER_ATTRS[collection], {})),
+                "total": len(getattr(self.data_manager, self.DATA_MANAGER_ATTRS[collection], {})),
                 "created": 0,
                 "failed": 0,
                 "skipped": 0,
@@ -130,104 +178,483 @@ class WeaviateImporter:
             "total_tokens_after": 0,
             "compression_ratios": []
         }
+        
+        # Initialize connection state
+        self._connection_verified = True
+        self._last_connection_check = time.time()
+
+    def _verify_connection(self) -> bool:
+        """Verify connection is still valid, with caching to prevent too frequent checks."""
+        current_time = time.time()
+        # Only check every 30 seconds unless forced
+        if current_time - self._last_connection_check < 30 and self._connection_verified:
+            return True
+            
+        try:
+            self.client.get_meta()
+            self._connection_verified = True
+            self._last_connection_check = current_time
+            return True
+        except Exception as e:
+            self._connection_verified = False
+            logger.error(f"Lost connection to Weaviate: {str(e)}")
+            return False
+            
+    def __enter__(self):
+        """Enhanced context manager setup with connection validation."""
+        try:
+            if not self.suppress_initial_logging:
+                logger.info("Initializing importer...")
+                
+            # Verify connection is still valid
+            if not self._verify_connection():
+                raise ConnectionError("Lost connection to Weaviate")
+                
+            return self
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize importer: {str(e)}")
+            self._cleanup()
+            raise
+            
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Enhanced cleanup with proper error handling."""
+        try:
+            if exc_type is not None:
+                logger.error(f"Error during import: {str(exc_val)}")
+                self._cleanup()
+                return False
+                
+            if not self.suppress_initial_logging:
+                self._log_import_summary()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}")
+            return False
+            
+    def _cleanup(self):
+        """Cleanup resources and log final state."""
+        try:
+            # Log final stats if available
+            if hasattr(self, 'import_stats') and not self.suppress_initial_logging:
+                logger.info("Import statistics at cleanup:")
+                for collection, stats in self.import_stats.items():
+                    if stats['total'] > 0:
+                        success_rate = (stats['created'] / stats['total']) * 100
+                        logger.info(f"{collection}: {stats['created']}/{stats['total']} created ({success_rate:.1f}%)")
+                        if stats['failed'] > 0:
+                            logger.info(f"  Failed: {stats['failed']}")
+                        if stats['retried'] > 0:
+                            logger.info(f"  Retried: {stats['retried']}")
+                            
+            # Clear any partial state
+            self.created_uuids = {k: {} for k in self.created_uuids.keys()}
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}")
+            
+    def _log_progress(self, collection: str, current: int, total: int, operation: str = "Processing"):
+        """Enhanced progress logging with error state tracking."""
+        if self.suppress_initial_logging:
+            return
+            
+        progress = (current / total) * 100 if total > 0 else 0
+        status = f"{operation} {collection}: {current}/{total} ({progress:.1f}%)"
+        
+        # Preserve rich progress bar if it exists
+        if hasattr(self, '_progress'):
+            self._progress.update(self._task_id, completed=current, description=status)
+        else:
+            logger.info(status)
+
+    def _validate_cross_reference_coherence(self) -> Tuple[bool, List[str]]:
+        """
+        Validate that all cross-references point to valid objects of the correct type.
+        Returns (is_valid, list_of_errors).
+        """
+        errors = []
+        
+        # Check Article references
+        for article_id, article in self.data_manager.articles.items():
+            # Check author references
+            for author_uuid in article.authors:
+                if not any(author.uuid == author_uuid for author in self.data_manager.authors.values()):
+                    errors.append(f"Article {article_id} references non-existent Author UUID: {author_uuid}")
+            
+            # Check reference references
+            for ref_uuid in article.references:
+                if not any(ref.uuid == ref_uuid for ref in self.data_manager.references.values()):
+                    errors.append(f"Article {article_id} references non-existent Reference UUID: {ref_uuid}")
+                
+            # Check named entity references
+            for entity_uuid in article.named_entities:
+                if not any(entity.uuid == entity_uuid for entity in self.data_manager.ner_objects.values()):
+                    errors.append(f"Article {article_id} references non-existent NamedEntity UUID: {entity_uuid}")
+        
+        # Check Author references
+        for author_id, author in self.data_manager.authors.items():
+            # Check article references
+            for article_uuid in author.articles:
+                if not any(article.uuid == article_uuid for article in self.data_manager.articles.values()):
+                    errors.append(f"Author {author_id} references non-existent Article UUID: {article_uuid}")
+        
+        # Check Reference references
+        for ref_id, ref in self.data_manager.references.items():
+            # Check citing article references
+            for article_uuid in ref.citing_articles:
+                if not any(article.uuid == article_uuid for article in self.data_manager.articles.values()):
+                    errors.append(f"Reference {ref_id} references non-existent Article UUID: {article_uuid}")
+        
+        # Check CitationContext direct references
+        for ctx_id, ctx in self.data_manager.citation_contexts.items():
+            if not any(article.uuid == ctx.article_uuid for article in self.data_manager.articles.values()):
+                errors.append(f"CitationContext {ctx_id} references non-existent Article UUID: {ctx.article_uuid}")
+            if not any(ref.uuid == ctx.reference_uuid for ref in self.data_manager.references.values()):
+                errors.append(f"CitationContext {ctx_id} references non-existent Reference UUID: {ctx.reference_uuid}")
+        
+        # Check NERArticleScore direct references
+        for score_id, score in self.data_manager.ner_scores.items():
+            if not any(article.uuid == score.article_uuid for article in self.data_manager.articles.values()):
+                errors.append(f"NERArticleScore {score_id} references non-existent Article UUID: {score.article_uuid}")
+            if not any(entity.uuid == score.entity_uuid for entity in self.data_manager.ner_objects.values()):
+                errors.append(f"NERArticleScore {score_id} references non-existent NamedEntity UUID: {score.entity_uuid}")
+        
+        # Check NameVariant direct references
+        for variant_id, variant in self.data_manager.name_variants.items():
+            if not any(author.uuid == variant.author_uuid for author in self.data_manager.authors.values()):
+                errors.append(f"NameVariant {variant_id} references non-existent Author UUID: {variant.author_uuid}")
+        
+        return len(errors) == 0, errors
 
     def import_data(self) -> bool:
-        """Import all data into Weaviate with progress tracking."""
+        """
+        Import data in phases while preserving text compression.
+        
+        Phases:
+        1. Create all primary objects with compressed text
+        2. Verify object creation
+        3. Add cross-references
+        
+        Returns:
+            bool: True if import successful, False otherwise
+        """
+        logger = logging.getLogger('weaviate_manager.importer')
+        logger.info("Beginning phased import process...")
+        
         try:
-            logging.info("\nStarting data import...")
+            # First validate cross-reference coherence
+            logger.info("Validating cross-reference coherence...")
+            is_valid, errors = self._validate_cross_reference_coherence()
+            if not is_valid:
+                logger.error("Cross-reference validation failed:")
+                for error in errors:
+                    logger.error(f"  {error}")
+                return False
+            logger.info("✓ Cross-references validated successfully")
             
+            # Phase 1: Create Primary Objects
+            logger.info("\nPhase 1: Creating primary objects...")
+            
+            # Process collections in dependency order
+            collection_order = [
+                "Article",      # Base content
+                "Author",       # Independent entities
+                "Reference",    # Independent entities
+                "NamedEntity",  # Independent entities
+                "CitationContext",  # Depends on Article/Reference
+                "NERArticleScore",  # Depends on Article/NamedEntity
+                "NameVariant"       # Depends on Author
+            ]
+            
+            # First verify all collections exist
+            logger.info("Verifying collections exist...")
+            existing_collections = self.client.collections.list_all(simple=True)
+            for collection_name in collection_order:
+                if collection_name not in existing_collections:
+                    logger.error(f"Collection {collection_name} does not exist")
+                    return False
+                logger.info(f"✓ Found collection: {collection_name}")
+            
+            # Create progress display
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
                 BarColumn(),
                 TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                console=None,  # This ensures output goes to stdout
-                transient=True  # This ensures the progress bar is cleared when done
+                TimeRemainingColumn(),
+                console=None if self.suppress_initial_logging else None
             ) as progress:
-                # Create task for overall progress
-                task = progress.add_task(
-                    "[cyan]Importing data...", 
-                    total=12  # Total steps including cross-references
-                )
+                # Phase 1 progress
+                phase1_total = sum(len(getattr(self.data_manager, self.DATA_MANAGER_ATTRS[col], {}))
+                                 for col in collection_order)
+                phase1_task = progress.add_task("Creating primary objects...", total=phase1_total)
                 
-                # Phase 1: Primary entity import
-                for collection_name in ["Article", "Author", "Reference", "NamedEntity"]:
-                    progress.update(task, description=f"[cyan]Importing {collection_name}...")
-                    if not self._import_collection_method(collection_name):
-                        logging.error(f"\n❌ Failed to import {collection_name} collection")
+                for collection_name in collection_order:
+                    logger.info(f"\nProcessing {collection_name} objects...")
+                    
+                    # Get data manager attribute for this collection
+                    data_attr = getattr(self.data_manager, self.DATA_MANAGER_ATTRS[collection_name])
+                    if not data_attr:
+                        logger.info(f"No data for collection {collection_name}, skipping...")
+                        continue
+                        
+                    collection = self.client.collections.get(collection_name)
+                    
+                    # Get collection schema to validate properties
+                    schema = collection.config.get()
+                    if not schema:
+                        logger.error(f"Could not get schema for collection {collection_name}")
                         return False
-                    logging.info(f"✓ Imported {len(self.created_uuids[collection_name]):,} {collection_name} objects")
-                    progress.advance(task)
-                
-                # Phase 2: Secondary entity import
-                for collection_name in ["CitationContext", "NERArticleScore", "NameVariant"]:
-                    if collection_name in self.data_manager.collections:
-                        progress.update(task, description=f"[cyan]Importing {collection_name}...")
-                        if not self._import_collection_method(collection_name):
-                            logging.error(f"\n❌ Failed to import {collection_name} collection")
+                        
+                    logger.debug(f"Collection {collection_name} schema: {schema}")
+                    
+                    # Use configured batch size for better performance
+                    batch_size = BATCH_SIZES.get(collection_name, BATCH_SIZES["default"])
+                    logger.info(f"Using batch size {batch_size} for {collection_name}")
+                    
+                    # Process in batches
+                    items = list(data_attr.items())
+                    collection_task = progress.add_task(f"Processing {collection_name}...", total=len(items))
+                    
+                    for i in range(0, len(items), batch_size):
+                        batch_items = items[i:i + batch_size]
+                        successful_uuids = set()
+                        
+                        # Verify connection before each batch
+                        if not self._verify_connection():
+                            raise ConnectionError("Lost connection during batch processing")
+                        
+                        try:
+                            with collection.batch.dynamic() as batch:
+                                for entity_id, entity in batch_items:
+                                    try:
+                                        # Prepare properties with text compression
+                                        properties = self._prepare_basic_properties(collection_name, entity)
+                                        
+                                        # Validate properties against schema
+                                        logger.debug(f"Validating properties for {collection_name} {entity_id}:")
+                                        logger.debug(f"Properties: {self._truncate_for_logging(json.dumps(properties, indent=2))}")
+                                        
+                                        # Generate consistent UUID
+                                        uuid = entity.uuid
+                                        
+                                        # Log what we're about to add
+                                        logger.debug(f"Adding {collection_name} {entity_id} with UUID {uuid}")
+                                        
+                                        # Add to batch without cross-references
+                                        result = batch.add_object(
+                                            properties=properties,
+                                            uuid=uuid
+                                        )
+                                        
+                                        if hasattr(result, 'errors') and result.errors:
+                                            logger.error(f"Failed to create {collection_name} object {entity_id}:")
+                                            for error in result.errors:
+                                                logger.error(f"  {error}")
+                                            self.import_stats[collection_name]["failed"] += 1
+                                        else:
+                                            self.created_uuids[collection_name][entity_id] = uuid
+                                            successful_uuids.add(uuid)
+                                            self.import_stats[collection_name]["created"] += 1
+                                            logger.debug(f"Created {collection_name} {entity_id}")
+                                        
+                                    except Exception as e:
+                                        error_msg = str(e)
+                                        if hasattr(e, 'response'):
+                                            resp = e.response
+                                            if hasattr(resp, 'content'):
+                                                error_msg = f"{error_msg}\nResponse: {resp.content}"
+                                        logger.error(f"Failed to create {collection_name} object {entity_id}: {str(e)}")
+                                        self.import_stats[collection_name]["failed"] += 1
+                                        continue
+                        
+                        except Exception as e:
+                            logger.error(f"Batch operation failed: {str(e)}")
+                            if hasattr(e, 'response'):
+                                logger.error(f"Response content: {e.response.content}")
+                            # Don't fail immediately, try next batch
+                            continue
+                        
+                        # Verify batch after creation
+                        time.sleep(1)  # Wait for consistency
+                        if not self._verify_batch_uuids(collection, successful_uuids):
+                            logger.error(f"Batch verification failed for {collection_name}")
+                            # If single object failed, try next one instead of failing completely
+                            if batch_size == 1:
+                                continue
                             return False
-                        logging.info(f"✓ Imported {len(self.created_uuids[collection_name]):,} {collection_name} objects")
-                        progress.advance(task)
+                        
+                        # Update progress
+                        progress.update(phase1_task, advance=len(batch_items))
+                        progress.update(collection_task, advance=len(batch_items))
+                    
+                    logger.info(f"✓ Created {self.import_stats[collection_name]['created']} {collection_name} objects")
                 
-                # Phase 3: Add cross-references
-                progress.update(task, description="[cyan]Adding cross-references...")
-                if not self._add_cross_references():
-                    logging.error("\n❌ Failed to add cross-references")
-                    return False
-                logging.info("✓ Added cross-references")
-                progress.advance(task)
+                # Phase 2: Verify Object Creation
+                logger.info("\nPhase 2: Verifying object creation...")
+                verify_task = progress.add_task("Verifying objects...", total=len(collection_order))
                 
-                # Complete the progress bar
-                progress.update(task, completed=12)
+                for collection_name in collection_order:
+                    collection = self.client.collections.get(collection_name)
+                    expected = self.import_stats[collection_name]["created"]
+                    if expected == 0:
+                        progress.update(verify_task, advance=1)
+                        continue
+                        
+                    actual = collection.aggregate.over_all().total_count
+                    
+                    if actual < expected:
+                        raise ValueError(
+                            f"Object verification failed for {collection_name}: "
+                            f"Expected {expected}, found {actual}"
+                        )
+                    logger.info(f"✓ Verified {actual} objects in {collection_name}")
+                    progress.update(verify_task, advance=1)
+                
+                # Phase 3: Add Cross-References
+                logger.info("\nPhase 3: Adding cross-references...")
+                
+                # Process collections in same order for references
+                for collection_name in collection_order:
+                    logger.info(f"\nAdding references for {collection_name}...")
+                    
+                    # Get data manager attribute for this collection
+                    data_attr = getattr(self.data_manager, self.DATA_MANAGER_ATTRS[collection_name])
+                    if not data_attr:
+                        continue
+                        
+                    collection = self.client.collections.get(collection_name)
+                    
+                    # Group all references by type for the entire collection
+                    reference_groups = defaultdict(list)
+                    
+                    # First pass: collect all references by type
+                    for entity_id, entity in data_attr.items():
+                        if entity_id not in self.created_uuids[collection_name]:
+                            continue
+                            
+                        uuid = self.created_uuids[collection_name][entity_id]
+                        
+                        # Collect references based on collection type
+                        if collection_name == "Article":
+                            if entity.authors:
+                                reference_groups["authors"].append((uuid, [str(author_uuid) for author_uuid in entity.authors]))
+                            if entity.references:
+                                reference_groups["references"].append((uuid, [str(ref_uuid) for ref_uuid in entity.references]))
+                        elif collection_name == "Author":
+                            if entity.articles:
+                                reference_groups["primary_articles"].append((uuid, [str(article_uuid) for article_uuid in entity.articles]))
+                            if entity.authored_references:
+                                reference_groups["authored_references"].append((uuid, [str(ref_uuid) for ref_uuid in entity.authored_references]))
+                            if entity.name_variants:
+                                reference_groups["name_variants"].append((uuid, [str(variant_uuid) for variant_uuid in entity.name_variants]))
+                        elif collection_name == "Reference":
+                            if entity.authors:
+                                reference_groups["authors"].append((uuid, [str(author_uuid) for author_uuid in entity.authors]))
+                            if entity.citing_articles:
+                                reference_groups["cited_in"].append((uuid, [str(article_uuid) for article_uuid in entity.citing_articles]))
+                            if entity.citation_contexts:
+                                reference_groups["citation_contexts"].append((uuid, [str(context_uuid) for context_uuid in entity.citation_contexts]))
+                        elif collection_name == "NamedEntity":
+                            if entity.articles:
+                                reference_groups["found_in"].append((uuid, list(str(article_uuid) for article_uuid in entity.articles)))
+                            if entity.ner_scores:
+                                reference_groups["article_scores"].append((uuid, list(str(score_uuid) for score_uuid in entity.ner_scores)))
+                        elif collection_name == "CitationContext":
+                            if entity.article_uuid:
+                                reference_groups["article"].append((uuid, [str(entity.article_uuid)]))
+                            if entity.reference_uuid:
+                                reference_groups["reference"].append((uuid, [str(entity.reference_uuid)]))
+                        elif collection_name == "NERArticleScore":
+                            if entity.article_uuid:
+                                reference_groups["article"].append((uuid, [str(entity.article_uuid)]))
+                            if entity.entity_uuid:
+                                reference_groups["entity"].append((uuid, [str(entity.entity_uuid)]))
+                        elif collection_name == "NameVariant":
+                            if entity.author_uuid:
+                                reference_groups["author"].append((uuid, [str(entity.author_uuid)]))
+                    
+                    # Second pass: add references in batches by type
+                    batch_size = 100  # Larger batch size for references
+                    
+                    # Calculate total references for this collection
+                    total_refs_for_collection = sum(len(refs) for refs in reference_groups.values())
+                    collection_task = progress.add_task(
+                        f"Adding {collection_name} references...",
+                        total=total_refs_for_collection
+                    )
+                    
+                    for ref_type, refs in reference_groups.items():
+                        logger.info(f"Adding {len(refs)} {ref_type} references for {collection_name}...")
+                        
+                        # Create progress task for this reference type
+                        ref_task = progress.add_task(
+                            f"Adding {collection_name} {ref_type} references...",
+                            total=len(refs)
+                        )
+                        
+                        # Process references in batches
+                        for i in range(0, len(refs), batch_size):
+                            batch_refs = refs[i:i + batch_size]
+                            try:
+                                with collection.batch.dynamic() as batch:
+                                    for from_uuid, to_uuids in batch_refs:
+                                        batch.add_reference(
+                                            from_uuid=from_uuid,
+                                            from_property=ref_type,
+                                            to=to_uuids
+                                        )
+                            except Exception as e:
+                                logger.error(f"Failed adding batch of {ref_type} references for {collection_name}: {str(e)}")
+                                if hasattr(e, 'response'):
+                                    logger.error(f"Response content: {e.response.content}")
+                                continue
+                            
+                            # Update progress using rich progress bar
+                            progress.update(ref_task, advance=len(batch_refs))
+                            progress.update(collection_task, advance=len(batch_refs))
+                    
+                    logger.info(f"Completed adding references for {collection_name}")
             
-            # Phase 4: Verify data and cross-references (outside progress bar)
-            logging.info("\nVerifying imported data and cross-references...")
-            if not self.verify_imported_data():
-                logging.error("❌ Data verification failed")
-                return False
+            # Log final statistics
+            logger.info("\nImport completed successfully")
+            for collection_name in collection_order:
+                stats = self.import_stats[collection_name]
+                if stats["total"] > 0:
+                    logger.info(f"\n{collection_name} Statistics:")
+                    logger.info(f"  Created: {stats['created']}/{stats['total']} ({(stats['created']/stats['total'])*100:.1f}%)")
+                    if stats["failed"] > 0:
+                        logger.info(f"  Failed: {stats['failed']}")
+                    if stats["references_created"] > 0:
+                        logger.info(f"  References Created: {stats['references_created']}")
             
-            # Print final success message
-            logging.info("\n✓ Import completed successfully!")
+            if self.compression_stats["total_compressed"] > 0:
+                avg_ratio = sum(self.compression_stats["compression_ratios"]) / len(self.compression_stats["compression_ratios"])
+                logger.info(f"\nCompression Statistics:")
+                logger.info(f"  Total Compressed: {self.compression_stats['total_compressed']}")
+                logger.info(f"  Average Compression Ratio: {avg_ratio:.2%}")
+            
             return True
             
         except Exception as e:
-            logging.error(f"Error during import: {str(e)}")
+            logger.error(f"Import failed: {str(e)}")
+            if hasattr(e, 'response'):
+                logger.error(f"Response content: {e.response.content}")
             return False
 
-    def _import_collection_method(self, collection_name: str) -> bool:
-        """Map collection names to their import methods."""
-        method_map = {
-            "Article": self._import_articles,
-            "Author": self._import_authors,
-            "Reference": self._import_references,
-            "NamedEntity": self._import_entities,
-            "CitationContext": self._import_contexts,
-            "NERArticleScore": self._import_scores,
-            "NameVariant": self._import_variants
+    def _get_data_manager_attr(self, collection_name: str) -> str:
+        """Map collection names to data manager attributes."""
+        mapping = {
+            "Article": "articles",
+            "Author": "authors",
+            "Reference": "references",
+            "NamedEntity": "ner_objects",
+            "CitationContext": "citation_contexts",
+            "NERArticleScore": "ner_scores",
+            "NameVariant": "name_variants"
         }
-        
-        if collection_name not in method_map:
-            logging.error(f"❌ No import method found for collection {collection_name}")
-            return False
-            
-        return method_map[collection_name]()
-
-    def __enter__(self):
-        """Set up the importer."""
-        try:
-            logging.info("Initializing importer...")
-            self.created_uuids = defaultdict(dict)
-            return self
-        except Exception as e:
-            logging.error(f"❌ Error initializing importer: {str(e)}")
-            raise
-            
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Clean up after import."""
-        if exc_type is not None:
-            logging.error(f"\n❌ Error during import: {str(exc_val)}")
-            return False
-        return True
+        return mapping.get(collection_name, "")
 
     def _verify_entity_creation(self) -> bool:
         """Verify that we have created the necessary entities before adding references."""
@@ -346,376 +773,461 @@ class WeaviateImporter:
             logger.debug(traceback.format_exc())
             return False
 
-    def _process_batch(self, collection, batch) -> bool:
-        """Process a batch of entities for creation."""
-        logger = logging.getLogger('weaviate_manager.importer')
+    def _process_batch(self, collection: weaviate.collections.Collection, batch: List[Tuple[str, Any]], batch_size: int = 10) -> bool:
+        """Process a batch of entities with enhanced error handling and verification."""
         try:
-            with collection.batch.dynamic() as batch_processor:
-                failed_objects = []
-                for entity_id, entity in batch:
-                    try:
-                        # Verify entity has required UUID
-                        if not hasattr(entity, 'uuid'):
-                            error_msg = f"Entity {entity_id} missing UUID"
-                            logger.error(error_msg)
-                            failed_objects.append((entity_id, [error_msg]))
-                            continue
-
-                        # Use the entity's pre-created UUID
-                        result = batch_processor.add_object(
-                            properties=self._prepare_basic_properties(collection.name, entity),
-                            uuid=entity.uuid
-                        )
+            max_retries = 3
+            retry_count = 0
+            
+            while retry_count < max_retries:
+                try:
+                    # Verify connection before processing batch
+                    if not self._verify_connection():
+                        raise ConnectionError("Lost connection during batch processing")
                         
-                        # Check if the object was actually created
-                        if result and hasattr(result, 'errors') and result.errors:
-                            failed_objects.append((entity_id, result.errors))
-                            self.import_stats[collection.name]["failed"] += 1
-                            logger.error(f"Failed to create {collection.name} {entity_id}:")
-                            for error in result.errors:
-                                logger.error(f"  {error}")
-                        else:
-                            # Track the UUID for verification
-                            self.created_uuids[collection.name][entity_id] = entity.uuid
-                            self.import_stats[collection.name]["created"] += 1
-                            logger.debug(f"Created {collection.name} {entity_id}")
-                            
-                    except Exception as e:
-                        error_msg = str(e)
-                        if hasattr(e, 'response'):
-                            resp = e.response
-                            if hasattr(resp, 'content'):
-                                error_msg = f"{error_msg}\nResponse: {resp.content}"
-                        logger.error(f"Failed to create {collection.name} {entity_id}:\n{error_msg}")
-                        failed_objects.append((entity_id, [error_msg]))
-                        self.import_stats[collection.name]["failed"] += 1
-            
-            if failed_objects:
-                error_msg = f"\nBatch processing failed for {collection.name}:"
-                error_msg += f"\nFailed: {len(failed_objects)}/{len(batch)} objects"
-                for entity_id, errors in failed_objects:
-                    error_msg += f"\n  {entity_id}:"
-                    for error in errors:
-                        error_msg += f"\n    {error}"
-                logger.error(error_msg)
-                return False  # For stricter error handling, fail if any object failed
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error processing batch: {str(e)}")
-            return False
+                    # Use legacy batch API for Weaviate 1.28.3
+                    with self.client.batch as batch_processor:
+                        batch_processor.batch_size = batch_size
+                        failed_objects = []
+                        successful_uuids = set()
+                        
+                        # Clear any previously tracked UUIDs for this batch
+                        for entity_id, entity in batch:
+                            if entity_id in self.created_uuids[collection.name]:
+                                del self.created_uuids[collection.name][entity_id]
+                        
+                        for entity_id, entity in batch:
+                            try:
+                                # Verify entity has required UUID
+                                if not hasattr(entity, 'uuid'):
+                                    error_msg = f"Entity {entity_id} missing UUID"
+                                    logger.error(error_msg)
+                                    failed_objects.append((entity_id, [error_msg]))
+                                    continue
 
-    def _prepare_basic_properties(self, entity_type: str, entity) -> Dict[str, Any]:
-        """Prepare basic properties, applying compression only when needed."""
-        logger = logging.getLogger('weaviate_manager.importer')
-        properties = {}
-        
-        # For Articles, handle text field compression specially
-        if entity_type == "Article":
-            # Define compressible fields in order of importance (most important first)
-            COMPRESSIBLE_FIELDS = [
-                "abstract",
-                "introduction",
-                "methods",
-                "results", 
-                "discussion",
-                "figures",
-                "tables"
-            ]
-            
-            # Define non-compressible fields that should be included
-            NON_COMPRESSIBLE_FIELDS = [
-                "filename",
-                "affiliations",
-                "funding_info",
-                "publication_info",
-                "acknowledgements",
-                "keywords",
-                "doi",
-                "journal",
-                "title",
-                "publication_date",
-                "authors_string",
-                "corresponding_authors",
-                "corresponding_emails"
-            ]
-            
-            # Step 1: Calculate tokens for all fields
-            field_tokens = {}
-            field_values = {}
-            uncompressible_total = 0
-            compressible_total = 0
-            
-            # Calculate tokens for non-compressible fields
-            for field in NON_COMPRESSIBLE_FIELDS:
-                if hasattr(entity, field):
-                    value = getattr(entity, field)
-                    if value is not None:
-                        properties[field] = value
-                        if isinstance(value, str):
-                            tokens = self._estimate_tokens(str(value))
-                            field_tokens[field] = tokens
-                            uncompressible_total += tokens
-            
-            # Calculate tokens for compressible fields
-            for field in COMPRESSIBLE_FIELDS:
-                if hasattr(entity, field):
-                    value = getattr(entity, field)
-                    if isinstance(value, str) and value.strip():
-                        tokens = self._estimate_tokens(str(value))
-                        field_tokens[field] = tokens
-                        field_values[field] = value
-                        compressible_total += tokens
-            
-            # Log initial token counts - only if exceeds limit
-            total_tokens = uncompressible_total + compressible_total
-            if total_tokens > DEFAULT_MAX_TOKENS:
-                logger.info(f"\nCompressing article: {entity.filename} ({total_tokens:,} tokens)")
-            
-            # If total is under limit, no compression needed
-            if total_tokens <= DEFAULT_MAX_TOKENS:
-                properties.update(field_values)
-                return properties
-            
-            # Calculate required compression
-            available_tokens = DEFAULT_MAX_TOKENS - uncompressible_total
-            if available_tokens <= 0:
-                raise ValueError(
-                    f"Non-compressible fields alone exceed token limit: {uncompressible_total:,} > {DEFAULT_MAX_TOKENS:,}"
-                )
-            
-            # Compress fields
-            compressed_total = 0
-            for field in COMPRESSIBLE_FIELDS:
-                if field not in field_values:
-                    continue
+                                # Prepare basic properties without references
+                                properties = self._prepare_basic_properties(collection.name, entity)
+                                logger.debug(f"Adding {collection.name} {entity_id} to batch with properties: {properties}")
+
+                                # Use legacy batch add_data_object
+                                result = batch_processor.add_data_object(
+                                    data_object=properties,
+                                    class_name=collection.name,
+                                    uuid=entity.uuid
+                                )
+                                
+                                # Track the UUID for verification
+                                self.created_uuids[collection.name][entity_id] = entity.uuid
+                                successful_uuids.add(entity.uuid)
+                                self.import_stats[collection.name]["created"] += 1
+                                logger.debug(f"Created {collection.name} {entity_id}")
+                                    
+                            except Exception as e:
+                                error_msg = str(e)
+                                if hasattr(e, 'response'):
+                                    resp = e.response
+                                    if hasattr(resp, 'content'):
+                                        error_msg = f"{error_msg}\nResponse: {resp.content}"
+                                logger.error(f"Failed to create {collection.name} {entity_id}:\n{error_msg}")
+                                failed_objects.append((entity_id, [error_msg]))
+                                self.import_stats[collection.name]["failed"] += 1
+                
+                        # Wait for consistency
+                        time.sleep(1)
+                        
+                        # Verify the batch
+                        if successful_uuids:
+                            if not self._verify_batch_uuids(collection, successful_uuids):
+                                if retry_count < max_retries - 1:
+                                    logger.warning(f"Batch verification failed, retrying (attempt {retry_count + 2}/{max_retries})")
+                                    retry_count += 1
+                                    self.import_stats[collection.name]["retried"] += len(successful_uuids)
+                                    # Clean up tracking on retry
+                                    for entity_id, _ in batch:
+                                        if entity_id in self.created_uuids[collection.name]:
+                                            del self.created_uuids[collection.name][entity_id]
+                                    continue
+                                else:
+                                    logger.error("Batch verification failed after all retries")
+                                    return False
+                
+                        if failed_objects:
+                            error_msg = f"\nBatch processing failed for {collection.name}:"
+                            error_msg += f"\nFailed: {len(failed_objects)}/{len(batch)} objects"
+                            for entity_id, errors in failed_objects:
+                                error_msg += f"\n  {entity_id}:"
+                                for error in errors:
+                                    error_msg += f"\n    {error}"
+                            logger.error(error_msg)
+                            return False
+                        
+                        return True
+                        
+                except Exception as e:
+                    error_msg = str(e)
+                    if hasattr(e, 'response'):
+                        resp = e.response
+                        if hasattr(resp, 'content'):
+                            error_msg = f"{error_msg}\nResponse: {resp.content}"
+                    logger.error(f"Error processing batch: {error_msg}")
                     
-                original_tokens = field_tokens[field]
-                # Calculate target tokens, ensuring important fields get minimum representation
-                min_tokens = 100 if field in ["abstract", "introduction"] else 50
-                target_tokens = max(
-                    min_tokens,
-                    min(
-                        original_tokens,  # Don't expand
-                        int(original_tokens * (available_tokens / compressible_total))  # Compress proportionally
-                    )
-                )
-                
-                # Ensure we don't exceed remaining tokens
-                remaining_tokens = available_tokens - compressed_total
-                if target_tokens > remaining_tokens:
-                    target_tokens = remaining_tokens
-                
-                if target_tokens <= 0:
-                    continue
-                
-                # Compress the field
-                compressed = self._reduce_text_to_token_limit(
-                    text=field_values[field],
-                    target_tokens=target_tokens,
-                    field_name=field
-                )
-                properties[field] = compressed
-                compressed_total += self._estimate_tokens(compressed)
-                
-                if compressed_total >= available_tokens:
-                    break
-            
-            # Log only final result if compression was needed
-            final_total = sum(self._estimate_tokens(str(v)) for v in properties.values() if v is not None)
-            if final_total > DEFAULT_MAX_TOKENS:
-                raise ValueError(
-                    f"Final token count {final_total:,} exceeds limit {DEFAULT_MAX_TOKENS:,}"
-                )
-            
-            # Update compression statistics silently
-            self.compression_stats["total_compressed"] += 1
-            self.compression_stats["total_tokens_before"] += compressible_total
-            self.compression_stats["total_tokens_after"] += compressed_total
-            self.compression_stats["compression_ratios"].append(compressed_total/compressible_total)
-            
-        else:
-            # For non-Article entities, copy properties including relationship sets
-            for field, value in vars(entity).items():
-                if field == 'uuid' or field == 'id':  # Only skip uuid/id fields
-                    continue
-                # Include relationship sets but convert to list for JSON serialization
-                if isinstance(value, set):
-                    properties[field] = list(value)
-                else:
-                    properties[field] = value
-        
-        return properties
-        
-    def _add_cross_references(self) -> bool:
-        """Add all cross-references between entities."""
-        try:
-            # Add article references
-            self._add_article_references()
-            
-            # Add author references
-            self._add_author_references()
-            
-            # Add reference references
-            self._add_reference_references()
-            
-            # Add entity references
-            self._add_entity_references()
-            
-            # Add context references
-            self._add_citation_context_references()
-            
-            # Add score references
-            self._add_score_references()
-            
-            # Add variant references
-            self._add_name_variant_references()
-            
-            return True
+                    if retry_count < max_retries - 1:
+                        retry_count += 1
+                        logger.info(f"Retrying batch for {collection.name} (attempt {retry_count + 1}/{max_retries})")
+                        # Clean up tracking on retry
+                        for entity_id, _ in batch:
+                            if entity_id in self.created_uuids[collection.name]:
+                                del self.created_uuids[collection.name][entity_id]
+                        continue
+                    
+                    return False
+                    
+            return False
             
         except Exception as e:
-            logging.error(f"Error adding cross-references: {str(e)}")
-            import traceback
-            logging.debug(traceback.format_exc())
+            logger.error(f"Batch processing failed: {str(e)}")
+            return False
+            
+    def _verify_batch_uuids(self, collection: weaviate.collections.Collection, expected_uuids: Set[str]) -> bool:
+        """Verify that all expected UUIDs exist in the collection with pagination."""
+        try:
+            # Build filters for UUIDs using proper Filter class
+            uuid_filters = [Filter.by_id().equal(uuid) for uuid in expected_uuids]
+            if not uuid_filters:
+                logger.debug("No UUIDs to verify")
+                return True
+                
+            filters = Filter.any_of(uuid_filters)
+            
+            # Log what we're looking for
+            logger.debug(f"Verifying {len(expected_uuids)} UUIDs")
+            
+            # Query for objects with pagination
+            found_uuids = set()
+            offset = 0
+            limit = 25  # Weaviate's default limit
+            
+            while True:
+                # Query with current offset and filter for only our expected UUIDs
+                result = collection.query.fetch_objects(
+                    limit=limit,
+                    offset=offset,
+                    include_vector=False,
+                    filters=filters
+                )
+
+                if not result or not hasattr(result, 'objects') or not result.objects:
+                    break
+
+                # Process this batch of results
+                current_batch = result.objects
+                logger.debug(f"Found {len(current_batch)} objects in response (offset={offset})")
+                
+                for obj in current_batch:
+                    if hasattr(obj, 'uuid'):
+                        # Convert Weaviate UUID to string for comparison
+                        found_uuids.add(str(obj.uuid))
+                    else:
+                        logger.error(f"Object missing uuid attribute: {obj}")
+                
+                # If we got fewer results than limit, we're done
+                if len(current_batch) < limit:
+                    break
+                    
+                # Move to next page
+                offset += limit
+
+            # Convert expected UUIDs to strings if they aren't already
+            expected_uuids_str = {str(uuid) for uuid in expected_uuids}
+            
+            # Check for missing UUIDs
+            missing_uuids = expected_uuids_str - found_uuids
+            if missing_uuids:
+                logger.error(f"Missing UUIDs: {missing_uuids}")
+                # Log a few examples for debugging
+                for uuid in list(missing_uuids)[:3]:
+                    logger.debug(f"Example missing UUID: {uuid}")
+                return False
+
+            # Since we filtered the query, we shouldn't need to check for unexpected UUIDs
+            # as only objects matching our filter would be returned
+
+            logger.info(f"Successfully verified {len(found_uuids)} UUIDs")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error verifying batch: {str(e)}")
+            if hasattr(e, 'response'):
+                logger.error(f"Response content: {e.response.content}")
             return False
 
-    def _process_text(self, text: str, field_name: str) -> str:
-        """
-        Process text fields for import, applying compression if needed.
+    def _truncate_for_logging(self, obj: Any, max_length: int = 20) -> str:
+        """Truncate object representation for logging.
         
-        Features:
-        - Token counting and estimation
-        - Intelligent text compression
-        - Length validation
-        - Statistics tracking
+        Args:
+            obj: Object to truncate
+            max_length: Maximum length of the string representation
+            
+        Returns:
+            str: Truncated string representation
         """
-        logger = logging.getLogger('weaviate_manager.importer')
+        s = str(obj)
+        if len(s) <= max_length:
+            return s
+        return f"{s[:max_length]}... [truncated, total length: {len(s)}]"
+
+    def _get_safe_token_limit(self) -> int:
+        """
+        Get the safe token limit for individual properties.
         
+        Calculates a safe token limit using:
+        - Base token limit from model configuration
+        - Safety margin to prevent overflows
+        - Rounding to ensure integer values
+        
+        Returns:
+            int: Maximum safe token count for a single property
+        """
+        return int(DEFAULT_MAX_TOKENS * TOKEN_SAFETY_MARGIN)
+
+    def _calculate_compression_ratio(self, current_tokens: int, safe_limit: int) -> float:
+        """
+        Calculate required compression ratio to fit within safe limit.
+        
+        The compression ratio is calculated as:
+        ratio = safe_limit / current_tokens
+        
+        A ratio of:
+        - 1.0 means no compression needed
+        - <1.0 means compression required (e.g., 0.5 = reduce by half)
+        - >1.0 is not possible (would mean expansion)
+        
+        Args:
+            current_tokens: Current number of tokens in text
+            safe_limit: Maximum safe token limit
+            
+        Returns:
+            float: Compression ratio to apply (1.0 if no compression needed)
+        """
+        if current_tokens <= safe_limit:
+            return 1.0
+        return safe_limit / current_tokens
+
+    def _calculate_importance_score(self, text: str) -> float:
+        """Calculate importance score for text content.
+        
+        Scores text based on:
+        - Presence of key scientific terms
+        - Presence of comparison terms
+        - Density of numerical content
+        - Presence of citations
+        - Position in text (favors first and last paragraphs)
+        
+        Returns:
+            float: Importance score (higher is more important)
+        """
+        score = 1.0  # Base score
+        
+        # Convert to lowercase for case-insensitive matching
+        text_lower = text.strip().lower()
+        
+        # Score key terms
+        for term in IMPORTANCE_KEY_TERMS:
+            if term in text_lower:
+                score += IMPORTANCE_WEIGHTS["key_terms"]
+        
+        # Score comparison terms
+        for term in IMPORTANCE_COMPARISON_TERMS:
+            if term in text_lower:
+                score += IMPORTANCE_WEIGHTS["comparisons"]
+        
+        # Score numerical content
+        num_count = sum(1 for c in text if c.isdigit())
+        score += (num_count / len(text)) * IMPORTANCE_WEIGHTS["numbers"] * 100
+        
+        # Score citations (rough heuristic for parenthetical citations)
+        citation_count = text.count("(") + text.count("[")
+        score += citation_count * IMPORTANCE_WEIGHTS["citations"]
+        
+        return score
+
+    def _process_text(self, text: str, field_name: str, force_ratio: Optional[float] = None) -> str:
+        """
+        Process text ensuring it fits within safe token limits.
+        
+        This method handles text compression in multiple stages:
+        1. Count tokens in input text
+        2. Return as-is if under limit and no force_ratio
+        3. Calculate required compression ratio
+        4. Apply intelligent compression preserving important content
+        5. Force truncate if still over limit
+        
+        The compression process preserves:
+        - Important scientific content
+        - Document structure
+        - Key information based on position
+        
+        Args:
+            text: Text content to process
+            field_name: Name of the field being processed
+            force_ratio: Optional ratio to force compression regardless of current size
+            
+        Returns:
+            str: Processed text guaranteed to be under token limit
+            
+        Side Effects:
+            - Updates compression statistics
+            - Logs compression details
+        """
         if not text:
             return ""
-            
-        # Enforce MAX_STRING_LENGTH
-        if len(text) > MAX_STRING_LENGTH:
-            text = text[:MAX_STRING_LENGTH]
-            logger.warning(f"Truncated {field_name} to {MAX_STRING_LENGTH} characters")
-                
-        # Count tokens
+        
+        safe_limit = self._get_safe_token_limit()
         tokens = self._tokenizer.encode(text)
         token_count = len(tokens)
         
-        # Only compress if needed
-        if token_count > DEFAULT_MAX_TOKENS:
-            logger.info(f"Compressing {field_name} ({token_count} tokens > {DEFAULT_MAX_TOKENS} limit)...")
-            compressed = self._reduce_text_to_token_limit(
-                text=text,
-                target_tokens=DEFAULT_MAX_TOKENS,
-                field_name=field_name
-            )
-            final_tokens = len(self._tokenizer.encode(compressed))
-            
-            # Force truncate if compression didn't meet token limit
-            if final_tokens > DEFAULT_MAX_TOKENS:
-                logger.warning(
-                    f"Compression insufficient for {field_name}. "
-                    f"Tokens: {final_tokens} > {DEFAULT_MAX_TOKENS}. "
-                    f"Force truncating..."
-                )
-                compressed = self._truncate_to_tokens(compressed, DEFAULT_MAX_TOKENS)
-                final_tokens = len(self._tokenizer.encode(compressed))
-            
-            # Update compression statistics
-            self.compression_stats["total_compressed"] += 1
-            self.compression_stats["total_tokens_before"] += token_count
-            self.compression_stats["total_tokens_after"] += final_tokens
-            ratio = final_tokens / token_count
-            self.compression_stats["compression_ratios"].append(ratio)
-            
-            logger.info(
-                f"Compressed {field_name}: {token_count:,} → {final_tokens:,} tokens "
-                f"({ratio:.1%} of original)"
-            )
-                
-            return compressed
-            
-        return text
-
-    def _reduce_text_to_token_limit(self, text: str, target_tokens: int, field_name: str) -> str:
-        """Intelligently reduce text to fit within token limit while preserving key content."""
-        logger = logging.getLogger('weaviate_manager.importer')
-        current_tokens = self._estimate_tokens(text)
+        logger.debug(f"Processing {field_name}: {token_count} tokens (limit: {safe_limit})")
         
-        if current_tokens <= target_tokens:
+        # If we're under the limit and no force_ratio, return as is
+        if token_count <= safe_limit and not force_ratio:
             return text
             
+        # Calculate required compression ratio
+        compression_ratio = force_ratio if force_ratio is not None else self._calculate_compression_ratio(token_count, safe_limit)
+        target_tokens = int(token_count * compression_ratio) if force_ratio else min(token_count, safe_limit)
+        
+        logger.debug(f"Compressing {field_name} with ratio {compression_ratio:.2f} "
+                    f"({token_count} -> {target_tokens} tokens)")
+        
+        # First try intelligent compression
+        compressed = self._reduce_text_to_token_limit(
+            text=text,
+            target_tokens=target_tokens,
+            compression_ratio=compression_ratio,
+            field_name=field_name
+        )
+        
+        # Verify and force truncate if still over limit
+        final_tokens = len(self._tokenizer.encode(compressed))
+        if final_tokens > target_tokens:
+            logger.warning(f"{field_name} still over limit after compression, truncating "
+                          f"({final_tokens} -> {target_tokens})")
+            compressed = self._truncate_to_tokens(compressed, target_tokens)
+            final_tokens = len(self._tokenizer.encode(compressed))
+            logger.debug(f"{field_name} final token count after truncation: {final_tokens}")
+            
+        # Update compression statistics
+        self.compression_stats["total_compressed"] += 1
+        self.compression_stats["total_tokens_before"] += token_count
+        self.compression_stats["total_tokens_after"] += final_tokens
+        self.compression_stats["compression_ratios"].append(final_tokens / token_count)
+        
+        return compressed
+
+    def _reduce_text_to_token_limit(
+        self, 
+        text: str, 
+        target_tokens: int,
+        compression_ratio: float,
+        field_name: str
+    ) -> str:
+        """
+        Intelligently reduce text using calculated compression ratio.
+        
+        This method implements a sophisticated compression strategy:
+        1. Split text into paragraphs
+        2. Score each paragraph for importance
+        3. Apply position-based weighting
+        4. Select and compress paragraphs to meet target
+        
+        Importance Scoring:
+        - Scientific term presence
+        - Comparison term presence
+        - Numerical content density
+        - Citation presence
+        - Position in text
+        
+        Position Weighting:
+        - First paragraph gets 2.0x weight
+        - Last paragraph gets 1.5x weight
+        - Middle paragraphs weighted by content
+        
+        Args:
+            text: Text to reduce
+            target_tokens: Target token count
+            compression_ratio: Required compression ratio
+            field_name: Name of field being processed
+            
+        Returns:
+            str: Compressed text meeting token limit while preserving important content
+        """
+        current_tokens = self._estimate_tokens(text)
+        if current_tokens <= target_tokens:
+            return text
+        
         # Split into sections
         paragraphs = text.split('\n\n')
         if not paragraphs:
             return text
-            
-        # Score paragraphs based on importance
+        
+        # Score and select paragraphs
         scored_paragraphs = []
-        for para in paragraphs:
+        for i, para in enumerate(paragraphs):
             if not para.strip():
                 continue
-                
+            
             # Calculate importance score
-            score = 1  # Base score
+            base_score = self._calculate_importance_score(para)
             
-            # Higher score for paragraphs with key terms
-            score += sum(2 for term in IMPORTANCE_KEY_TERMS if term.lower() in para.lower())
+            # Position bias: favor first and last paragraphs
+            position_score = 0
+            if i == 0:  # First paragraph
+                position_score = 2.0
+            elif i == len(paragraphs) - 1:  # Last paragraph
+                position_score = 1.5
             
-            # Higher score for paragraphs with numbers/measurements
-            score += sum(1 for char in para if char.isdigit())
-            
-            # Higher score for paragraphs with citations
-            score += para.count('(') + para.count('[')
-            
-            # Higher score for paragraphs with comparison terms
-            score += sum(1 for term in IMPORTANCE_COMPARISON_TERMS if term.lower() in para.lower())
-            
-            # Store score and token count
+            final_score = base_score + position_score
             para_tokens = self._estimate_tokens(para)
-            scored_paragraphs.append((score, para, para_tokens))
-            
+            scored_paragraphs.append((final_score, para, para_tokens))
+        
         # Sort by importance score
         scored_paragraphs.sort(reverse=True)
         
-        # Always include first paragraph if it fits
+        # Calculate target length for each paragraph based on compression ratio
         reduced_text = []
-        current_total = 0
+        remaining_tokens = target_tokens
         
+        # Always try to include first paragraph
         if scored_paragraphs:
             first_para = scored_paragraphs[0][1]
             first_tokens = self._estimate_tokens(first_para)
-            if first_tokens <= target_tokens:
+            first_target = int(first_tokens * compression_ratio)
+            if first_target <= remaining_tokens:
+                if first_tokens > first_target:
+                    first_para = self._truncate_to_tokens(first_para, first_target)
                 reduced_text.append(first_para)
-                current_total = first_tokens
+                remaining_tokens -= self._estimate_tokens(first_para)
                 scored_paragraphs = scored_paragraphs[1:]
         
-        # Add highest scoring paragraphs that fit
+        # Process remaining paragraphs
         for score, para, para_tokens in scored_paragraphs:
-            if current_total + para_tokens <= target_tokens:
+            # Calculate target tokens for this paragraph based on importance
+            importance_factor = min(1.2, score / scored_paragraphs[0][0])  # Cap at 120%
+            para_target = int(para_tokens * compression_ratio * importance_factor)
+            
+            if para_target <= remaining_tokens:
+                if para_tokens > para_target:
+                    para = self._truncate_to_tokens(para, para_target)
                 reduced_text.append(para)
-                current_total += para_tokens
+                remaining_tokens -= self._estimate_tokens(para)
             else:
-                # Try to fit a truncated version if we have room
-                remaining = target_tokens - current_total
-                if remaining > 50:  # Only if we have reasonable space
-                    truncated = self._truncate_to_tokens(para, remaining)
+                # Try to fit a smaller portion if high importance
+                if score > 1.5 and remaining_tokens > 50:
+                    truncated = self._truncate_to_tokens(para, remaining_tokens)
                     reduced_text.append(truncated)
-                    current_total += remaining
                 break
         
-        if not reduced_text:  # If nothing fit, at least keep some of the first paragraph
-            first_para = paragraphs[0]
-            reduced_text = [self._truncate_to_tokens(first_para, target_tokens)]
-        
-        final = '\n\n'.join(reduced_text)
-        final_tokens = self._estimate_tokens(final)
-        
-        # Remove debug logging of individual field compression
-        return final
+        return '\n\n'.join(reduced_text)
 
     def _truncate_to_tokens(self, text: str, max_tokens: int, from_end: bool = False) -> str:
         """Truncate text to fit within token limit."""
@@ -793,8 +1305,6 @@ class WeaviateImporter:
                 logging.debug(f"Created: {stats['created']} ({stats['created']/stats['total']:.1%})")
                 if stats["failed"] > 0:
                     logging.debug(f"Failed: {stats['failed']} ({stats['failed']/stats['total']:.1%})")
-                if stats["skipped"] > 0:
-                    logging.debug(f"Skipped: {stats['skipped']} ({stats['skipped']/stats['total']:.1%})")
                 if stats["references_created"] > 0:
                     logging.debug(f"References Created: {stats['references_created']}")
         
@@ -1185,357 +1695,239 @@ class WeaviateImporter:
             logging.error(f"Error importing name variants: {str(e)}")
             return False
 
-    def _add_article_references(self) -> bool:
+    def _format_reference(self, collection_name: str, uuid: str) -> str:
+        """Format a reference UUID into Weaviate's expected format."""
+        # Just return the UUID string - Weaviate's batch API expects simple UUIDs
+        return str(uuid)
+
+    def _add_article_references(self, batch, uuid, article) -> bool:
         """Add all relationships for Article entities."""
         try:
-            collection = self.client.collections.get("Article")
+            # Add author references
+            if article.authors:
+                try:
+                    # Pass list of UUIDs directly
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="authors",
+                        to=[str(author_uuid) for author_uuid in article.authors]
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding author references for article: {str(e)}")
             
-            with collection.batch.dynamic() as batch:
-                for article_id, article in self.data_manager.articles.items():
-                    if article_id not in self.created_uuids["Article"]:
-                        continue
-                        
-                    article_uuid = article.uuid
-                    
-                    # Add author references
-                    if article.authors:
-                        try:
-                            batch.add_reference(
-                                from_uuid=article_uuid,
-                                from_property="authors",
-                                to=list(article.authors)
-                            )
-                        except Exception as e:
-                            logging.error(f"Failed adding author references for article {article_id}: {str(e)}")
-                    
-                    # Add reference references
-                    if article.references:
-                        try:
-                            batch.add_reference(
-                                from_uuid=article_uuid,
-                                from_property="references",
-                                to=list(article.references)
-                            )
-                        except Exception as e:
-                            logging.error(f"Failed adding reference citations for article {article_id}: {str(e)}")
-                    
-                    # Add named entity references
-                    if article.named_entities:
-                        try:
-                            batch.add_reference(
-                                from_uuid=article_uuid,
-                                from_property="named_entities",
-                                to=list(article.named_entities)
-                            )
-                        except Exception as e:
-                            logging.error(f"Failed adding named entity references for article {article_id}: {str(e)}")
-                    
-                    # Add citation context references
-                    if article.citation_contexts:
-                        try:
-                            batch.add_reference(
-                                from_uuid=article_uuid,
-                                from_property="citation_contexts",
-                                to=list(article.citation_contexts)
-                            )
-                        except Exception as e:
-                            logging.error(f"Failed adding citation context references for article {article_id}: {str(e)}")
-                    
-                    # Add NER score references
-                    if article.ner_scores:
-                        try:
-                            batch.add_reference(
-                                from_uuid=article_uuid,
-                                from_property="ner_scores",
-                                to=list(article.ner_scores)
-                            )
-                        except Exception as e:
-                            logging.error(f"Failed adding NER score references for article {article_id}: {str(e)}")
+            # Add reference references
+            if article.references:
+                try:
+                    # Pass list of UUIDs directly
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="references",
+                        to=[str(ref_uuid) for ref_uuid in article.references]
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding reference citations for article: {str(e)}")
             
             return True
             
         except Exception as e:
-            logging.error(f"Error adding article references: {str(e)}")
+            logger.error(f"Error adding article references: {str(e)}")
             return False
 
-    def _add_author_references(self) -> bool:
+    def _add_author_references(self, batch, uuid, author) -> bool:
         """Add all relationships for Author entities."""
         try:
-            collection = self.client.collections.get("Author")
-            total_authors = len(self.data_manager.authors)
-            authors_processed = 0
+            # Add article references
+            if author.articles:
+                try:
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="primary_articles",
+                        to=[str(article_uuid) for article_uuid in author.articles]
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding article references for author: {str(e)}")
             
-            with collection.batch.dynamic() as batch:
-                for author_id, author in self.data_manager.authors.items():
-                    if author_id not in self.created_uuids["Author"]:
-                        continue
-                        
-                    author_uuid = author.uuid
-                    
-                    # Add article references
-                    if author.articles:
-                        try:
-                            batch.add_reference(
-                                from_uuid=author_uuid,
-                                from_property="primary_articles",
-                                to=list(author.articles)
-                            )
-                            authors_processed += 1
-                            if authors_processed % 50000 == 0:  # Log every 50k
-                                logging.info(f"Author relationships: {authors_processed:,}/{total_authors:,}")
-                        except Exception as e:
-                            logging.error(f"Failed adding article references for author {author_id}: {str(e)}")
-                    
-                    # Add reference references
-                    if author.authored_references:
-                        try:
-                            batch.add_reference(
-                                from_uuid=author_uuid,
-                                from_property="authored_references",
-                                to=list(author.authored_references)
-                            )
-                        except Exception as e:
-                            logging.error(f"Failed adding reference references for author {author_id}: {str(e)}")
-                    
-                    # Add name variant references
-                    if author.name_variants:
-                        try:
-                            batch.add_reference(
-                                from_uuid=author_uuid,
-                                from_property="name_variants",
-                                to=list(author.name_variants)
-                            )
-                        except Exception as e:
-                            logging.error(f"Failed adding name variant references for author {author_id}: {str(e)}")
-                        
+            # Add reference references
+            if author.authored_references:
+                try:
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="authored_references",
+                        to=[str(ref_uuid) for ref_uuid in author.authored_references]
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding reference references for author: {str(e)}")
+            
+            # Add name variant references
+            if author.name_variants:
+                try:
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="name_variants",
+                        to=[str(variant_uuid) for variant_uuid in author.name_variants]
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding name variant references for author: {str(e)}")
+            
             return True
             
         except Exception as e:
-            logging.error(f"Error adding author references: {str(e)}")
+            logger.error(f"Error adding author references: {str(e)}")
             return False
 
-    def _add_reference_references(self) -> bool:
+    def _add_reference_references(self, batch, uuid, reference) -> bool:
         """Add all relationships for Reference entities."""
         try:
-            collection = self.client.collections.get("Reference")
-            total_refs = len(self.data_manager.references)
-            refs_processed = 0
+            # Add author references
+            if reference.authors:
+                try:
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="authors",
+                        to=[str(author_uuid) for author_uuid in reference.authors]
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding author references for reference: {str(e)}")
             
-            with collection.batch.dynamic() as batch:
-                for ref_id, ref in self.data_manager.references.items():
-                    try:
-                        if ref_id not in self.created_uuids["Reference"]:
-                            continue
-                            
-                        ref_uuid = ref.uuid
-                        # Add author references
-                        if ref.authors:
-                            try:
-                                batch.add_reference(
-                                    from_uuid=ref_uuid,
-                                    from_property="authors",
-                                    to=list(ref.authors)
-                                )
-                                refs_processed += 1
-                                if refs_processed % 50000 == 0:  # Log every 50k
-                                    logging.info(f"Reference relationships: {refs_processed:,}/{total_refs:,}")
-                            except Exception as e:
-                                logging.error(f"Failed adding author references for reference {ref_id}: {str(e)}")
-                        
-                        # Add citing article references
-                        if ref.citing_articles:
-                            try:
-                                batch.add_reference(
-                                    from_uuid=ref_uuid,
-                                    from_property="cited_in",
-                                    to=list(ref.citing_articles)
-                                )
-                            except Exception as e:
-                                logging.error(f"Failed adding citing article references for reference {ref_id}: {str(e)}")
-                                
-                        # Add citation context references
-                        if ref.citation_contexts:
-                            try:
-                                batch.add_reference(
-                                    from_uuid=ref_uuid,
-                                    from_property="citation_contexts",
-                                    to=list(ref.citation_contexts)
-                                )
-                            except Exception as e:
-                                logging.error(f"Failed adding citation context references for reference {ref_id}: {str(e)}")
-
-                    except Exception as e:
-                        logging.error(f"Failed processing reference {ref_id}: {str(e)}")
-                        continue
-
+            # Add citing article references
+            if reference.citing_articles:
+                try:
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="cited_in",
+                        to=[str(article_uuid) for article_uuid in reference.citing_articles]
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding citing article references for reference: {str(e)}")
+            
+            # Add citation context references
+            if reference.citation_contexts:
+                try:
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="citation_contexts",
+                        to=[str(context_uuid) for context_uuid in reference.citation_contexts]
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding citation context references for reference: {str(e)}")
+            
             return True
             
         except Exception as e:
-            logging.error(f"Error adding reference references: {str(e)}")
+            logger.error(f"Error adding reference references: {str(e)}")
             return False
 
-    def _add_entity_references(self) -> bool:
+    def _add_entity_references(self, batch, uuid, entity) -> bool:
         """Add all relationships for NamedEntity entities."""
         try:
-            collection = self.client.collections.get("NamedEntity")
+            # Add article references
+            if entity.articles:
+                try:
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="found_in",
+                        to=list(entity.articles)
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding article references for entity: {str(e)}")
             
-            with collection.batch.dynamic() as batch:
-                for entity_id, entity in self.data_manager.ner_objects.items():
-                    if entity_id not in self.created_uuids["NamedEntity"]:
-                        continue
-                        
-                    entity_uuid = entity.uuid
-                    
-                    # Add article references
-                    if entity.articles:
-                        try:
-                            batch.add_reference(
-                                from_uuid=entity_uuid,
-                                from_property="found_in",
-                                to=list(entity.articles)
-                            )
-                        except Exception as e:
-                            logging.error(f"Failed adding article references for entity {entity_id}: {str(e)}")
-                    
-                    # Add score references
-                    if entity.ner_scores:
-                        try:
-                            batch.add_reference(
-                                from_uuid=entity_uuid,
-                                from_property="article_scores",
-                                to=list(entity.ner_scores)
-                            )
-                        except Exception as e:
-                            logging.error(f"Failed adding score references for entity {entity_id}: {str(e)}")
-                        
+            # Add score references
+            if entity.ner_scores:
+                try:
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="article_scores",
+                        to=list(entity.ner_scores)
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding score references for entity: {str(e)}")
+            
             return True
             
         except Exception as e:
-            logging.error(f"Error adding entity references: {str(e)}")
+            logger.error(f"Error adding entity references: {str(e)}")
             return False
-            
-    def _add_citation_context_references(self) -> bool:
+
+    def _add_citation_context_references(self, batch, uuid, context) -> bool:
         """Add all relationships for CitationContext entities."""
         try:
-            collection = self.client.collections.get("CitationContext")
+            # Add article reference
+            if context.article_uuid:
+                try:
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="article",
+                        to=context.article_uuid
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding article reference for context: {str(e)}")
             
-            with collection.batch.dynamic() as batch:
-                for ctx_id, ctx in self.data_manager.citation_contexts.items():
-                    try:
-                        if ctx_id not in self.created_uuids["CitationContext"]:
-                            continue
-                            
-                        ctx_uuid = ctx.uuid
-                        
-                        # Add article reference
-                        if ctx.article_uuid:
-                            try:
-                                batch.add_reference(
-                                    from_uuid=ctx_uuid,
-                                    from_property="article",
-                                    to=ctx.article_uuid
-                                )
-                            except Exception as e:
-                                logging.error(f"Failed adding article reference for context {ctx_id}: {str(e)}")
-                        
-                        # Add reference reference
-                        if ctx.reference_uuid:
-                            try:
-                                batch.add_reference(
-                                    from_uuid=ctx_uuid,
-                                    from_property="reference",
-                                    to=ctx.reference_uuid
-                                )
-                            except Exception as e:
-                                logging.error(f"Failed adding reference reference for context {ctx_id}: {str(e)}")
-
-                    except Exception as e:
-                        logging.error(f"Failed processing citation context {ctx_id}: {str(e)}")
-                        continue
-
+            # Add reference reference
+            if context.reference_uuid:
+                try:
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="reference",
+                        to=context.reference_uuid
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding reference reference for context: {str(e)}")
+            
             return True
             
         except Exception as e:
-            logging.error(f"Error adding citation context references: {str(e)}")
+            logger.error(f"Error adding citation context references: {str(e)}")
             return False
-            
-    def _add_score_references(self) -> bool:
+
+    def _add_score_references(self, batch, uuid, score) -> bool:
         """Add all relationships for NERArticleScore entities."""
         try:
-            collection = self.client.collections.get("NERArticleScore")
+            # Add entity reference
+            if score.entity_uuid:
+                try:
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="entity",
+                        to=score.entity_uuid
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding entity reference for score: {str(e)}")
             
-            with collection.batch.dynamic() as batch:
-                for score_id, score in self.data_manager.ner_scores.items():
-                    try:
-                        if score_id not in self.created_uuids["NERArticleScore"]:
-                            continue
-                            
-                        score_uuid = score.uuid
-                        
-                        # Add entity reference
-                        if score.entity_uuid:
-                            try:
-                                batch.add_reference(
-                                    from_uuid=score_uuid,
-                                    from_property="entity",
-                                    to=score.entity_uuid
-                                )
-                            except Exception as e:
-                                logging.error(f"Failed adding entity reference for score {score_id}: {str(e)}")
-                        
-                        # Add article reference
-                        if score.article_uuid:
-                            try:
-                                batch.add_reference(
-                                    from_uuid=score_uuid,
-                                    from_property="article",
-                                    to=score.article_uuid
-                                )
-                            except Exception as e:
-                                logging.error(f"Failed adding article reference for score {score_id}: {str(e)}")
-
-                    except Exception as e:
-                        logging.error(f"Failed processing NER score {score_id}: {str(e)}")
-                        continue
-
+            # Add article reference
+            if score.article_uuid:
+                try:
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="article",
+                        to=score.article_uuid
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding article reference for score: {str(e)}")
+            
             return True
             
         except Exception as e:
-            logging.error(f"Error adding NER score references: {str(e)}")
+            logger.error(f"Error adding NER score references: {str(e)}")
             return False
-            
-    def _add_name_variant_references(self) -> bool:
+
+    def _add_name_variant_references(self, batch, uuid, variant) -> bool:
         """Add all relationships for NameVariant entities."""
         try:
-            collection = self.client.collections.get("NameVariant")
+            # Add author reference
+            if variant.author_uuid:
+                try:
+                    batch.add_reference(
+                        from_uuid=uuid,
+                        from_property="author",
+                        to=variant.author_uuid
+                    )
+                except Exception as e:
+                    logger.error(f"Failed adding author reference for variant: {str(e)}")
             
-            with collection.batch.dynamic() as batch:
-                for variant_id, variant in self.data_manager.name_variants.items():
-                    try:
-                        if variant_id not in self.created_uuids["NameVariant"]:
-                            continue
-                            
-                        variant_uuid = variant.uuid
-                        
-                        # Add author reference
-                        if variant.author_uuid:
-                            try:
-                                batch.add_reference(
-                                    from_uuid=variant_uuid,
-                                    from_property="author",
-                                    to=variant.author_uuid
-                                )
-                            except Exception as e:
-                                logging.error(f"Failed adding author reference for variant {variant_id}: {str(e)}")
-
-                    except Exception as e:
-                        logging.error(f"Failed processing name variant {variant_id}: {str(e)}")
-                        continue
-
             return True
             
         except Exception as e:
-            logging.error(f"Error adding name variant references: {str(e)}")
+            logger.error(f"Error adding name variant references: {str(e)}")
             return False
 
     def _verify_cross_references(self) -> bool:
@@ -1565,10 +1957,6 @@ class WeaviateImporter:
                 )
                 
                 # Verify each reference type exists
-                if not article.references:
-                    logging.error("❌ No references found in sample article")
-                    return False
-                    
                 for ref_type in ["authors", "references", "named_entities", "citation_contexts", "ner_scores"]:
                     if ref_type not in article.references:
                         logging.error(f"❌ Missing {ref_type} references in sample article")
@@ -1606,4 +1994,133 @@ class WeaviateImporter:
             
         except Exception as e:
             logging.error(f"Error verifying data: {str(e)}")
-            return False 
+            return False
+
+    def _prepare_basic_properties(self, collection_name: str, entity: Any) -> Dict[str, Any]:
+        """Prepare properties ensuring each text field is under token limit."""
+        try:
+            properties = {}
+            safe_limit = self._get_safe_token_limit()
+            logger.info(f"\nPreparing properties for {collection_name} with safe token limit {safe_limit}")
+            
+            # Process each property based on collection type
+            if collection_name == "Article":
+                # First calculate total tokens before compression
+                raw_properties = {
+                    "filename": entity.filename,
+                    "affiliations": entity.affiliations,
+                    "funding_info": entity.funding_info,
+                    "abstract": entity.abstract,
+                    "introduction": entity.introduction,
+                    "methods": entity.methods,
+                    "results": entity.results,
+                    "discussion": entity.discussion,
+                    "figures": entity.figures,
+                    "tables": entity.tables,
+                    "publication_info": entity.publication_info,
+                    "acknowledgements": entity.acknowledgements
+                }
+                
+                # Log token counts for each field before compression
+                total_tokens = 0
+                for field_name, value in raw_properties.items():
+                    if isinstance(value, str):
+                        tokens = self._estimate_tokens(value)
+                        total_tokens += tokens
+                        logger.info(f"Field {field_name}: {tokens} tokens")
+                
+                logger.info(f"Total tokens before compression: {total_tokens}")
+                
+                # Now process each field
+                properties = {
+                    field_name: self._process_text(value, field_name) 
+                    for field_name, value in raw_properties.items()
+                }
+                
+                # Log token counts after compression
+                final_total = 0
+                for field_name, value in properties.items():
+                    if isinstance(value, str):
+                        tokens = self._estimate_tokens(value)
+                        final_total += tokens
+                        logger.info(f"Field {field_name} after compression: {tokens} tokens")
+                
+                logger.info(f"Total tokens after compression: {final_total}")
+                
+            elif collection_name == "Author":
+                properties = {
+                    "canonical_name": self._process_text(entity.canonical_name, "canonical_name"),
+                    "email": self._process_text(entity.email, "email")
+                }
+            elif collection_name == "Reference":
+                properties = {
+                    "title": self._process_text(entity.title, "title"),
+                    "journal": self._process_text(entity.journal, "journal"),
+                    "volume": self._process_text(entity.volume, "volume"),
+                    "pages": self._process_text(entity.pages, "pages"),
+                    "publication_date": self._process_text(entity.publication_date, "publication_date"),
+                    "raw_reference": self._process_text(entity.raw_reference, "raw_reference")
+                }
+            elif collection_name == "NamedEntity":
+                properties = {
+                    "name": self._process_text(entity.name, "name"),
+                    "type": self._process_text(entity.type, "type")
+                }
+            elif collection_name == "NameVariant":
+                properties = {
+                    "name": self._process_text(entity.name, "name")
+                }
+            elif collection_name == "CitationContext":
+                properties = {
+                    "section": self._process_text(entity.section, "section"),
+                    "local_ref_id": self._process_text(entity.local_ref_id, "local_ref_id")
+                }
+            elif collection_name == "NERArticleScore":
+                properties = {
+                    "score": entity.score  # Numeric field, no text processing needed
+                }
+            else:
+                raise ValueError(f"Unknown collection: {collection_name}")
+            
+            # Verify all text fields are under limit
+            total_tokens = 0
+            for field_name, value in properties.items():
+                if isinstance(value, str):
+                    tokens = self._estimate_tokens(value)
+                    total_tokens += tokens
+                    if tokens > safe_limit:
+                        logger.error(f"Field {field_name} exceeds safe limit: {tokens} > {safe_limit}")
+                        raise ValueError(
+                            f"Field {field_name} in {collection_name} still exceeds token limit "
+                            f"after processing: {tokens} > {safe_limit}"
+                        )
+            
+            logger.info(f"Final total tokens for all fields: {total_tokens}")
+            if total_tokens > safe_limit:
+                logger.error(f"Total tokens {total_tokens} exceeds safe limit {safe_limit}")
+                # We need to reduce further
+                compression_ratio = safe_limit / total_tokens
+                logger.info(f"Applying additional compression with ratio {compression_ratio:.2f}")
+                
+                # Reprocess all text fields with the new ratio
+                for field_name, value in properties.items():
+                    if isinstance(value, str):
+                        properties[field_name] = self._process_text(
+                            value, 
+                            field_name,
+                            force_ratio=compression_ratio
+                        )
+                
+                # Verify final total
+                final_total = sum(
+                    self._estimate_tokens(value) 
+                    for value in properties.values() 
+                    if isinstance(value, str)
+                )
+                logger.info(f"Final total tokens after additional compression: {final_total}")
+            
+            return properties
+            
+        except Exception as e:
+            logger.error(f"Error preparing properties for {collection_name}: {str(e)}")
+            raise

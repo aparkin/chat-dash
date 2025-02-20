@@ -9,6 +9,12 @@ OpenAI API Configuration:
 - Model selection and parameters
 - Token limits and usage controls
 
+Token Management Configuration:
+- Per-model token limits with safety margins
+- Text compression thresholds and ratios
+- Content preservation settings
+- Token estimation parameters
+
 Text Processing Settings:
 - Token counting and estimation
 - Text compression thresholds
@@ -29,6 +35,18 @@ Vector Search Parameters:
 Each section is clearly marked with comments and includes detailed
 descriptions of the parameters and their valid ranges where applicable.
 Environment-specific settings (development vs. production) are also handled.
+
+Token Management Details:
+- MODEL_TOKEN_LIMITS: Maximum tokens per model
+- TOKEN_SAFETY_MARGIN: Buffer for token limits (e.g., 0.95 = 95% of max)
+- DEFAULT_MAX_TOKENS: Safe token limit for current model
+- WORDS_PER_TOKEN: Conservative estimate for text analysis
+
+Compression Configuration:
+- TEXT_REDUCTION_RATIOS: Field-specific compression ratios
+- IMPORTANCE_WEIGHTS: Scoring weights for content preservation
+- IMPORTANCE_KEY_TERMS: Scientific terms to preserve
+- IMPORTANCE_COMPARISON_TERMS: Comparison terms to preserve
 """
 import os
 from dotenv import load_dotenv
@@ -43,10 +61,10 @@ load_dotenv(dotenv_path=dotenv_path)
 
 # OpenAI Settings
 if False:  # Toggle for development environment
-    OPENAI_BASE_URL = os.getenv('CBORG_BASE_URL', 'https://api.openai.com')
+    OPENAI_BASE_URL = os.getenv('CBORG_BASE_URL', "https://api.cborg.lbl.gov")
     OPENAI_API_KEY = os.getenv('CBORG_API_KEY', '')  # Must be set in environment
 else:  # Production environment
-    OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL', 'https://api.openai.com')
+    OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1')
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')  # Must be set in environment
 
 if not OPENAI_API_KEY:
@@ -146,12 +164,12 @@ ARTICLE_SECTIONS = [
 
 # Batch Processing Sizes
 BATCH_SIZES = {
-    "Article": 10,      # Articles have large text content
-    "Reference": 50,    # References have moderate content
+    "Article": 1,      # Articles have large text content
+    "Reference": 100,    # References have moderate content
     "Author": 100,      # Author records are small
     "NamedEntity": 100, # Entity records are small
-    "NameVariant": 100, # Name variants are small text records
-    "CitationContext": 50, # Citation contexts have moderate content
+    "NameVariant":100, # Name variants are small text records
+    "CitationContext": 100, # Citation contexts have moderate content
     "NERArticleScore": 100, # Score records are very small
     "default": 50       # Default for other collections
 }
@@ -168,8 +186,8 @@ WEAVIATE_GRPC_PORT = 443
 WEAVIATE_SECURE = True
 
 # Timeouts (in seconds)
-REQUEST_TIMEOUT = 120    # General API request timeout
-VECTORIZER_TIMEOUT = 120 # Specific timeout for vectorization operations
+REQUEST_TIMEOUT = (1200, 1200)    # General API request timeout
+VECTORIZER_TIMEOUT = 2000        # Specific timeout for vectorization operations
 
 #-----------------------------------------------------------------------------
 # Vector Search Configuration

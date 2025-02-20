@@ -7,6 +7,24 @@ for scientific literature data. It manages:
 - Cross-references between collections
 - Vectorization and generative AI configurations
 - Schema validation and inspection
+
+Text Field Configuration:
+- Proper tokenization settings for each field type
+- Vectorization configuration for semantic search
+- Field-specific indexing settings
+- Length and content validation
+
+Vectorization Features:
+- OpenAI API integration
+- Model-specific configurations
+- Token limit management
+- Base URL handling
+- API key management
+
+The schema follows a structured approach where:
+1. Primary collections are created first with their basic properties
+2. Cross-references are added after all collections exist
+3. Schema validation ensures all required relationships are properly established
 """
 
 import logging
@@ -32,13 +50,26 @@ from ..config.settings import (
 from .inspector import DatabaseInspector
 
 class SchemaGenerator:
-    """Generator for creating and managing Weaviate schema for scientific literature data.
+    """
+    Generator for creating and managing Weaviate schema for scientific literature data.
     
     This class is responsible for:
     - Creating primary collections with their properties (Article, Author, Reference, etc.)
     - Configuring vectorization and generative AI settings
     - Establishing cross-references between collections
     - Validating schema consistency
+    
+    Text Field Management:
+    - Configures appropriate tokenization for each field
+    - Sets up vectorization for semantic search
+    - Configures field-specific indexing
+    - Establishes field validation rules
+    
+    Vectorization Configuration:
+    - Integrates with OpenAI API
+    - Configures model-specific settings
+    - Manages token limits
+    - Handles base URLs and API keys
     
     The schema follows a structured approach where:
     1. Primary collections are created first with their basic properties
@@ -70,10 +101,13 @@ class SchemaGenerator:
                 - vectorizer_config: OpenAI text vectorization configuration
                 - generative_config: OpenAI generative AI configuration
         """
+        # Log the base URL for debugging
+        logging.info(f"Creating configs with OpenAI base URL: {OPENAI_BASE_URL}")
+        
         vectorizer_config = Configure.Vectorizer.text2vec_openai(
             model=VECTORIZER_MODEL,
             dimensions=VECTOR_DIMENSIONS,
-            base_url=OPENAI_BASE_URL
+            base_url=OPENAI_BASE_URL.replace('/v1', '')
         )
         
         generative_config = Configure.Generative.openai(
@@ -86,6 +120,7 @@ class SchemaGenerator:
             presence_penalty=GENERATIVE_PRESENCE_PENALTY
         )
         
+        logging.info(f"Vectorizer config: {vectorizer_config}")
         return vectorizer_config, generative_config
         
     def create_schema(self) -> bool:
@@ -110,6 +145,23 @@ class SchemaGenerator:
         try:
             logging.debug("Starting schema creation...")
             
+            # First check if schema already exists
+            existing_collections = self.client.collections.list_all(simple=True)
+            if existing_collections:
+                logging.info("Found existing collections:")
+                for collection in existing_collections:
+                    logging.info(f"  - {collection}")
+                    
+                # Verify each collection has correct configuration
+                for collection in existing_collections:
+                    config = self.client.collections.get(collection).config.get()
+                    if not config:
+                        logging.error(f"Collection {collection} has invalid configuration")
+                        return False
+                    logging.info(f"Verified configuration for {collection}")
+                
+                return True
+            
             vectorizer_config, generative_config = self.create_base_configs()
             
             # Create primary collections first (without references)
@@ -128,6 +180,10 @@ class SchemaGenerator:
             
         except Exception as e:
             logging.error(f"Error creating schema: {str(e)}")
+            if hasattr(e, 'response'):
+                resp = e.response
+                if hasattr(resp, 'content'):
+                    logging.error(f"Response content: {resp.content}")
             raise
             
     def validate_schema(self) -> bool:

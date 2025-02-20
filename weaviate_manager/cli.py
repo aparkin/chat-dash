@@ -37,6 +37,7 @@ from typing import Optional
 import json
 
 import weaviate
+import openai
 
 from .config.settings import (
     VECTORIZER_MODEL,
@@ -543,7 +544,6 @@ def show_schema(client: weaviate.Client):
 def show_models():
     """Display available AI models and their configurations."""
     from .config.settings import OPENAI_API_KEY, OPENAI_BASE_URL
-    import requests
     from rich.console import Console
     from rich.table import Table
     
@@ -563,37 +563,30 @@ def show_models():
     console.print("\nChecking available models...", style="bold blue")
     
     try:
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        response = requests.get(
-            f"{OPENAI_BASE_URL}/v1/models",
-            headers=headers
+        # Configure OpenAI client
+        client = openai.OpenAI(
+            api_key=OPENAI_API_KEY,
+            base_url=OPENAI_BASE_URL
         )
         
-        if response.status_code == 200:
-            models = response.json()
-            
-            # Create available models table
-            model_table = Table(title="Available OpenAI Models")
-            model_table.add_column("Model ID", style="green")
-            model_table.add_column("Status", style="cyan")
-            
-            for model in models.get('data', []):
-                model_table.add_row(
-                    model['id'],
-                    "✓ In Use" if model['id'] in [VECTORIZER_MODEL, GENERATIVE_MODEL] else ""
-                )
-            
-            console.print(model_table)
-            
-            # Log detailed response to debug file only
-            logging.debug(f"Full models response: {models}")
-        else:
-            console.print(f"[red]Failed to get models (Status {response.status_code})[/red]")
-            logging.error(f"Models API error: {response.text}")
+        # Get models using the client
+        models = client.models.list()
+        
+        # Create available models table
+        model_table = Table(title="Available OpenAI Models")
+        model_table.add_column("Model ID", style="green")
+        model_table.add_column("Status", style="cyan")
+        
+        for model in models:
+            model_table.add_row(
+                model.id,
+                "✓ In Use" if model.id in [VECTORIZER_MODEL, GENERATIVE_MODEL] else ""
+            )
+        
+        console.print(model_table)
+        
+        # Log detailed response to debug file only
+        logging.debug(f"Full models response: {models}")
             
     except Exception as e:
         console.print(f"[red]Error checking models: {str(e)}[/red]")

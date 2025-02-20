@@ -1,14 +1,33 @@
 """
 Weaviate client management module.
 
-Provides functions for creating and managing Weaviate client connections.
+Provides functions for creating and managing Weaviate client connections with:
+- Robust error handling for API calls
+- Proper configuration for OpenAI vectorization
+- Connection state management and verification
+- Automatic retry logic for transient failures
+- Detailed logging of connection events
+
+Key Features:
+- Configurable timeouts for different operations
+- Connection health monitoring
+- Batch operation management
+- Resource cleanup handling
+- Detailed error reporting
+
+The module ensures proper configuration of:
+- OpenAI API integration
+- Vectorization settings
+- Connection parameters
+- Security settings
+- Timeout configurations
 """
 
 import logging
 from typing import Optional, Dict, Any
 
 import weaviate
-from weaviate.config import AdditionalConfig
+from weaviate.config import AdditionalConfig, Timeout
 from weaviate.embedded import EmbeddedOptions
 
 from ..config.settings import (
@@ -20,28 +39,69 @@ from ..config.settings import (
     REQUEST_TIMEOUT,
     VECTORIZER_TIMEOUT,
     OPENAI_API_KEY,
-    OPENAI_BASE_URL
+    OPENAI_BASE_URL,
+    VECTORIZER_MODEL,
+    VECTOR_DIMENSIONS
 )
 
 def get_client() -> weaviate.Client:
-    """Get configured Weaviate client with proper context management."""
-    client = weaviate.connect_to_custom(
-        http_host=WEAVIATE_HOST,
-        http_port=WEAVIATE_HTTP_PORT,
-        http_secure=WEAVIATE_SECURE,
-        grpc_host=WEAVIATE_GRPC_HOST,
-        grpc_port=WEAVIATE_GRPC_PORT,
-        grpc_secure=WEAVIATE_SECURE,
-        headers={
-            "X-OpenAI-Api-Key": OPENAI_API_KEY,
-        },
-        additional_config=AdditionalConfig(
-            timeout_config=REQUEST_TIMEOUT,
-            timeout_vectorizer=VECTORIZER_TIMEOUT
-        ),
-        skip_init_checks=True  # Skip OpenID config check
-    )
-    return ClientContextManager(client)
+    """
+    Get configured Weaviate client with proper context management.
+    
+    Features:
+    - Configures OpenAI vectorization settings
+    - Sets appropriate timeouts for operations
+    - Enables connection health monitoring
+    - Provides detailed error reporting
+    
+    Configuration:
+    - Uses settings from config module
+    - Configures OpenAI API integration
+    - Sets appropriate timeouts
+    - Enables secure connections
+    
+    Returns:
+        weaviate.Client: Configured client instance wrapped in context manager
+        
+    Raises:
+        ConnectionError: If connection cannot be established
+        ValueError: If required configuration is missing
+    """
+    try:
+        client = weaviate.connect_to_custom(
+            http_host=WEAVIATE_HOST,
+            http_port=WEAVIATE_HTTP_PORT,
+            http_secure=True,
+            grpc_host=WEAVIATE_GRPC_HOST,
+            grpc_port=WEAVIATE_GRPC_PORT,
+            grpc_secure=True,
+            headers={
+                "X-OpenAI-Api-Key": OPENAI_API_KEY,
+            },
+            additional_config=AdditionalConfig(
+                timeout_config=REQUEST_TIMEOUT,
+                timeout_vectorizer=VECTORIZER_TIMEOUT,
+            ),
+            skip_init_checks=True
+        )
+        
+        # Verify connection is working
+        meta = client.get_meta()
+        version = meta.get('version', 'unknown')
+
+        logging.info(f"Connected to Weaviate version: {version}")
+
+
+
+        return ClientContextManager(client)
+        
+    except Exception as e:
+        logging.error(f"Failed to establish Weaviate connection: {str(e)}")
+        if hasattr(e, 'response'):
+            resp = e.response
+            if hasattr(resp, 'content'):
+                logging.error(f"Response content: {resp.content}")
+        raise
 
 class ClientContextManager:
     """Context manager wrapper for Weaviate client."""
