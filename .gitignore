@@ -62,3 +62,4 @@ versions/
 # Legacy
 WeaviateQueryManager/
 old_analysis_manager/
+weaviate_manager_history.txt
