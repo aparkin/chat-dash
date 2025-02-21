@@ -1,47 +1,98 @@
 """
-ChatDash.py
-Version: 1.0.0
-Last verified working: 2024-12-30
+ChatDash: Interactive Data Analysis and Chat Interface
+===================================================
 
-A Dash application that provides an interactive chat interface with dataset management.
+A Dash-based application that combines interactive data analysis with an AI-powered
+chat interface. Provides seamless integration between traditional data analysis tools
+and natural language interaction.
 
-Usage Instructions:
-1. Starting the App:
-   - Run the script: python ChatDash.py
-   - Access via browser at http://localhost:8051
+Core Components
+-------------
+1. Data Management System
+   - Multi-format data import (CSV, TSV, ZIP)
+   - Automatic data profiling and validation
+   - Memory-efficient data handling
+   - Real-time memory usage monitoring
+   - Dataset comparison capabilities
 
-2. Dataset Management:
-   - Upload files using drag-and-drop or file selector
-   - Supported formats: CSV, TSV, ZIP (containing CSV/TSV)
-   - Click '×' to delete datasets
-   - Monitor memory usage in the status bar
+2. AI Chat Interface
+   - Natural language data analysis
+   - Multiple AI model support
+   - Context-aware responses
+   - Code generation and execution
+   - Command history tracking
 
-3. Chat Interface:
-   - Type messages in the text area
-   - Click 'Send' to submit messages
-   - Click dataset names to auto-generate queries
-   - Use "tell me about" queries for dataset exploration
-
-4. Dataset Analysis:
-   - Preview: Shows first few rows of data
-   - Statistics: Displays detailed profiling report
-   - Visualization: Interactive plots and charts
-   - Database: SQL database structure and ERD
-   - Weaviate: Vector database collections and relationships
-     * Table Summary: Collection statistics and properties
-     * ER Diagram: Visual representation of collection relationships
-
-5. Database Connections:
-   - SQL Database:
-     * Select database from dropdown
-     * View schema and relationships
-     * Execute queries through chat
+3. Database Integration
+   - SQL Database Support:
+     * Dynamic connection management
+     * Schema visualization with ERD
+     * Interactive query execution
+     * Query result caching
    - Weaviate Vector Database:
-     * Real-time connection status
-     * Collection availability monitoring
-     * Detailed schema visualization
+     * Real-time connection monitoring
+     * Collection management
+     * Vector similarity search
+     * Schema visualization
 
-Note: All callbacks must remain above the if __name__ == '__main__' block
+4. Visualization System
+   - Interactive data plots
+   - Real-time visualization updates
+   - Multiple visualization types
+   - Custom plot configurations
+   - Export capabilities
+
+Technical Specifications
+----------------------
+- Server: Dash (Flask-based)
+- Port: 8051
+- Host: 0.0.0.0 (network accessible)
+- Python Version: 3.8+
+- Key Dependencies:
+  * dash
+  * pandas
+  * plotly
+  * openai
+  * weaviate-client
+  * sqlite3
+
+Security Features
+---------------
+- Input validation for all data uploads
+- SQL query sanitization
+- API key secure management
+- Database access controls
+- Error handling and logging
+
+Installation
+-----------
+1. Environment Setup:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # or `venv\\Scripts\\activate` on Windows
+   pip install -r requirements.txt
+   ```
+
+2. Configuration:
+   - Copy .env.example to .env
+   - Set required API keys and endpoints
+   - Configure database connections
+
+3. Running:
+   ```bash
+   python ChatDash.py
+   ```
+   Access via browser at http://localhost:8051
+
+Development Notes
+---------------
+- All callbacks must remain above __main__ block
+- Service registry pattern for extensibility
+- Modular design for easy feature addition
+- Comprehensive error handling
+- Memory management considerations
+
+Version: 1.0.0
+License: MIT
 """
 
 import dash
@@ -202,9 +253,16 @@ app.config.suppress_callback_exceptions = True
 #
 ####################################
 
-def get_base_help_message() -> str:
-    """Get the base help message for UI and general features."""
-    return """Here's what you can do with this chat interface:
+def get_help_message(service_registry: Optional[ServiceRegistry] = None) -> str:
+    """Get help message for UI and available commands.
+    
+    Args:
+        service_registry: Optional service registry for service-specific help
+        
+    Returns:
+        str: Complete help message with UI help and optionally service documentation
+    """
+    base_message = """Here's what you can do with this chat interface:
 
 📁 **Dataset Management**
 - Add datasets by:
@@ -233,21 +291,12 @@ All visualizations feature:
 - Click the dataset cards to switch between datasets
 """
 
-def get_complete_help_message(service_registry: ServiceRegistry) -> str:
-    """Get the complete help message including service documentation.
+    if service_registry:
+        service_help = service_registry.get_help_text()
+        if service_help:
+            return f"{base_message}\n\n🔧 **Available Commands**\n{service_help}"
     
-    Args:
-        service_registry: The service registry containing all registered services
-        
-    Returns:
-        str: Complete help message with UI help and service documentation
-    """
-    base_help = get_base_help_message()
-    service_help = service_registry.get_help_text()
-    
-    if service_help:
-        return f"{base_help}\n\n🔧 **Available Commands**\n{service_help}"
-    return base_help
+    return base_message
 
 ####################################
 #
@@ -579,209 +628,43 @@ initialize_index_search(text_searcher, text_searcher_db)
 #
 ####################################
 
-def create_system_message(dataset_info: List[Dict[str, Any]], 
-                         search_query: Optional[str] = None,
-                         database_structure: Optional[Dict] = None,
-                         weaviate_results: Optional[Dict] = None) -> str:
-    """Create system message with context from datasets, database, and literature."""
-
-    base_message = "You are a data analysis assistant with access to:"
-    # Track available data sources
-    has_datasets = bool(dataset_info)
-    has_database = bool(database_structure)
-    has_literature = True  # We always have access to literature search through Weaviate
-    has_literature_results = bool(weaviate_results and weaviate_results.get('unified_results'))
-
-    # Add dataset information
-    if has_datasets:
-        base_message += "\n\nDatasets:"
-        for ds in dataset_info:
-            base_message += f"\n- {ds['name']}: {ds['rows']} rows, columns: {', '.join(ds['columns'])}"
-            if ds.get('selected'):
-                base_message += " (currently selected)"
-
-    # Add database information
-    if has_database:
-        base_message += "\n\nConnected Database Tables:"
-        for table, info in database_structure.items():
-            # Add table info
-            base_message += f"\n\n{table} ({info['row_count']} rows)"
-            
-            # Add column details
-            base_message += "\nColumns:"
-            for col in info['columns']:
-                constraints = []
-                if col['pk']: constraints.append("PRIMARY KEY")
-                if col['notnull']: constraints.append("NOT NULL")
-                if col['default']: constraints.append(f"DEFAULT {col['default']}")
-                constraint_str = f" ({', '.join(constraints)})" if constraints else ""
-                base_message += f"\n  - {col['name']}: {col['type']}{constraint_str}"
-            
-            # Add foreign key relationships
-            if info['foreign_keys']:
-                base_message += "\nForeign Keys:"
-                for fk in info['foreign_keys']:
-                    base_message += f"\n  - {fk['from']} → {fk['table']}.{fk['to']}"
-
-    base_message += "You are also involved in an interactive conversation with a user trying to analyze information in the various datasources to which you have access."
-    base_message += "You also have accesses to a portion of the chat history as context."
-    base_message += "You are able to use the chat history to inform your responses."
-    base_message += """
-    You should always summarize how much context from chat history you are able to see (number of each type of message)
-    In the chat history, you will see messages from the user, other services, and yourself.
-    If service messages immediately follow the last user message, you should use the service's response as context.
-    You should not repeat that information but rather summarize its relationship to information you have about any datasets or databases that we mention above.
-    If the last message is a user message, you should analyze the chat history and any information we have about datasets and the database to inform your response.
-    In any case, in your response you should follow these guidelines:
-    """
-    # Add knowledge retrieval instructions first
-    base_message += "\n\nKnowledge Integration:"
-    base_message += "\n1. First, provide relevant background knowledge from your training:"
-    base_message += "\n   - Explain key concepts, terminology, and relationships"
-    base_message += "\n   - Describe standard methodologies or approaches"
-    base_message += "\n   - Highlight important considerations or limitations"
-    base_message += "\n2. Then suggest how to explore this knowledge using available data sources:"
-    base_message += "\n   - Identify relevant fields or patterns to search for"
-    base_message += "\n   - Propose specific analyses or comparisons"
-    base_message += "\n   - Structure suggestions to help formulate targeted queries"
-
-    base_message += "\n\nChat History Context:"
-    base_message += "\n1. The most recent messages in the chat history contain important context:"
-    base_message += "\n   - Pay special attention to service messages that immediately follow user messages"
-    base_message += "\n   - Build upon service responses rather than repeating their content"
-    base_message += "\n   - Focus on adding value through analysis and connections to other data"
-    
-    base_message += "\n\n2. When responding to follow-up questions:"
-    base_message += "\n   - Check if there's a service message responding to the previous message"
-    base_message += "\n   - If yes, use that response as context but don't repeat it"
-    base_message += "\n   - If no, proceed with a direct response"
-    base_message += "\n   - Connect new requests to previously discussed data or analyses"
-    base_message += "\n   - Maintain continuity in multi-step analyses or explorations"
-    
-    base_message += "\n\n3. Service Message Handling:"
-    base_message += "\n   - Service messages contain authoritative responses about queries, data, or operations"
-    base_message += "\n   - When you see a service message following a user query:"
-    base_message += "\n     * Use it as the primary response to that query"
-    base_message += "\n     * Add analysis and insights to the service's results"
-    base_message += "\n     * Suggest next steps based on the service's results"
-    base_message += "\n     * DO NOT restate what the service has already said"
-    base_message += "\n     * DO NOT suggest new queries when service has already returned results"
-    base_message += "\n     * For search results, analyze the returned data rather than suggesting new searches"
-    base_message += "\n     * CRITICAL: DO NOT suggest python code or any related code. The dataset service LLM will do that for you."
-    base_message += "\n     * If you do notice an error in the code, call it out and explain why it is an error."
-    
-    base_message += "\n\n4. Progressive Analysis:"
-    base_message += "\n   - Build upon previous analyses and visualizations"
-    base_message += "\n   - Reference previous findings when suggesting new approaches"
-    base_message += "\n   - Maintain context when refining or expanding previous queries"
-    base_message += "\n   - Focus on adding new insights rather than repeating known information"
-    base_message += "\n   - When search results are provided, analyze those results rather than suggesting new searches"
-    # Add instructions for handling different types of queries
-    base_message += "\n\nWhen responding to the user's message:"
-
-    if has_datasets:
-        base_message += "\n- If the query relates to the available datasets, suggest ways to analyze the data"
-        base_message += "\n- If you find relevant information in the datasets, include it in your response"
-        base_message += "\n- Remember: Datasets are separate from the database and cannot be queried using SQL"
-        base_message += "\n- To analyze datasets, suggest the user use the available visualization and analysis tools with specific suggestions"
-    
-    if has_database:
-        base_message += "\n- If you recognize a SQL query, analyze it and suggest improvements if needed"
-        base_message += "\n- If you receive a natural language database question, propose an appropriate SQL query"
-        base_message += "\n- DO NOT execute SQL queries directly - only suggest them for the user to execute"
-        base_message += "\n- DO NOT claim to have run queries unless the user has explicitly executed them"
-        base_message += "\n- Ensure all SQL queries are valid for SQLite and don't use extended features"
-    else:
-        base_message += "\n- DO NOT suggest or reference SQL queries"
-        base_message += "\n- Focus on other available data sources and general knowledge"
-    
-    if has_literature:
-        base_message += "\n- You have access to a scientific literature database through Weaviate"
-        base_message += "\n- For literature queries, use the available search functionality"
-        base_message += "\n- When referencing literature results, use the [ID] format"
-    
-    base_message += "\n- You can combine available data sources with general knowledge"
-    base_message += "\n- If no specific data is found, provide a helpful response using your general knowledge"
-    base_message += "\n- NEVER suggest querying data sources that are not currently connected"
-    base_message += "\n- NEVER claim to have executed queries or retrieved data unless explicitly done by the user"
-
-    if has_database:
-        # Enhanced SQL Guidelines
-        base_message += "\n\nSQL Query Guidelines:"
-        
-        # 1. Safety and Compatibility
-        base_message += "\n\n1. Query Safety and Compatibility:"
-        base_message += "\n   - Use ONLY SQLite-compatible syntax"
-        base_message += "\n   - SQLite limitations to be aware of:"
-        base_message += "\n     * NO SIMILAR TO pattern matching (use LIKE or GLOB instead)"
-        base_message += "\n     * NO FULL OUTER JOIN (use LEFT/RIGHT JOIN)"
-        base_message += "\n     * NO WINDOW FUNCTIONS before SQLite 3.25"
-        base_message += "\n     * NO stored procedures or functions"
-        base_message += "\n   - NO database modifications (INSERT/UPDATE/DELETE/DROP/ALTER/CREATE)"
-        base_message += "\n   - NO destructive or resource-intensive operations"
-        base_message += "\n   - Ensure proper table/column name quoting"
-        base_message += "\n   - IMPORTANT: SQL queries can ONLY be run against the connected database tables listed above"
-        base_message += "\n   - Datasets (if any are loaded) cannot be queried with SQL - they are separate from the database"
-        
-        # 2. User SQL Handling
-        base_message += "\n\n2. When User Provides SQL Code:"
-        base_message += "\n   - Validate for safety and SQLite compatibility"
-        base_message += "\n   - If safe and valid:"
-        base_message += "\n     * Use it as your primary (original) suggestion"
-        base_message += "\n     * Explain what it does"
-        base_message += "\n     * Suggest improvements as alternative queries"
-        base_message += "\n   - If unsafe or invalid:"
-        base_message += "\n     * Explain the specific issues"
-        base_message += "\n     * Provide a safe alternative as primary suggestion"
-        base_message += "\n     * Include the user's query as a comment for reference"
-        
-        # 3. Query Response Format
-        base_message += "\n\n3. Query Response Format:"
-        base_message += "\n   Always structure responses as follows:"
-        base_message += "\n   a) Primary Query (Original):"
-        base_message += "\n   ```sql"
-        base_message += "\n   -- Purpose: Clear description of query goal"
-        base_message += "\n   -- Tables: List of tables used"
-        base_message += "\n   -- Assumptions: Any important assumptions"
-        base_message += "\n   SELECT ... -- Your SQL here"
-        base_message += "\n   ```"
-        base_message += "\n   b) Alternative Queries (if relevant):"
-        base_message += "\n   ```sql"
-        base_message += "\n   -- Improvement: Explain how this improves on original"
-        base_message += "\n   SELECT ... -- Alternative SQL"
-        base_message += "\n   ```"
-        base_message += "\n   Note: Query IDs will be added automatically by the system. Do not include them in your response."
-        
-        # 4. Query Best Practices
-        base_message += "\n\n4. Query Best Practices:"
-        base_message += "\n   - Use explicit column names instead of SELECT *"
-        base_message += "\n   - Include appropriate WHERE clauses to limit results"
-        base_message += "\n   - Use meaningful table aliases in JOINs"
-        base_message += "\n   - Add comments for complex logic"
-        base_message += "\n   - Consider performance with large tables"
-        
-        # 5. Execution Instructions
-        base_message += "\n\n5. Query Execution:"
-        base_message += "\n   Users can execute queries using:"
-        base_message += '\n   - "search." or "query."to run the primary (original) query'
-        base_message += '\n   - "search|query query_ID" to run a specific query'
-        base_message += '\n   - "convert query_ID to dataset" to save results'
-
-    return base_message
-
 def create_chat_element(message: dict) -> dbc.Card:
-    """
-    Create a styled chat element based on message type.
+    """Create a styled chat message component with appropriate formatting and styling.
+    
+    Generates a Dash Bootstrap Card component for displaying chat messages with:
+    - Role-specific styling (user, assistant, system, service)
+    - Markdown rendering for formatted text
+    - Service-specific headers and indicators
+    - Error state handling
+    - Responsive layout adjustments
+    
+    Styling Rules:
+    1. User messages: Right-aligned with primary color
+    2. Assistant messages: Left-aligned with light background
+    3. System messages: Left-aligned with warning color
+    4. Service messages: Full-width with service-specific styling
+    5. Error messages: Error-state styling with red accents
     
     Args:
-        message (dict): Message dictionary containing:
-            - role (str): One of 'user', 'assistant', 'system', or 'service'
-            - content (str): The message text
-            - service (str, optional): Service name if message is from a service
+        message (dict): Message configuration containing:
+            - role (str): Message role ('user', 'assistant', 'system', 'service')
+            - content (str): Message text content
+            - service (str, optional): Service name for service messages
             - type (str, optional): Message type for service messages
-        
+            - metadata (dict, optional): Additional message metadata
+            
     Returns:
-        dbc.Card: Styled card component
+        dbc.Card: Styled Dash Bootstrap card component with:
+            - Appropriate styling based on message role
+            - Formatted content with markdown support
+            - Service headers when applicable
+            - Error state indicators when needed
+            
+    Notes:
+        - Styling is controlled by CHAT_STYLES global dictionary
+        - Service messages get special handling for tables and code
+        - ChatLLM service has custom styling for better readability
+        - Error messages override normal service styling
     """
     # Determine style based on message properties
     if 'service' in message:
@@ -871,7 +754,38 @@ def get_database_files(data_dir='data') -> list:
         return []
 
 def generate_mermaid_erd(structure: dict) -> str:
-    """Generate Mermaid ERD diagram from database structure."""
+    """Generate a Mermaid.js Entity-Relationship Diagram from database structure.
+    
+    Creates a comprehensive ERD visualization including:
+    1. Tables with column details
+    2. Primary and foreign key indicators
+    3. Relationship lines with cardinality
+    4. Column data types and constraints
+    5. Index indicators
+    
+    Diagram Features:
+    - Tables represented as entities
+    - Columns listed with types
+    - Primary keys marked with PK
+    - Foreign keys marked with FK
+    - Relationships shown with arrows
+    - Cardinality indicators (1:1, 1:N, N:M)
+    
+    Args:
+        structure (dict): Database structure information containing:
+            - tables: Dict of table information
+            - relationships: List of foreign key relationships
+            - metadata: Database-level metadata
+            
+    Returns:
+        str: Mermaid.js compatible ERD diagram code
+        
+    Note:
+        - Handles special characters in names
+        - Includes metadata indicators
+        - Optimizes layout for readability
+        - Compatible with Mermaid.js v8.11+
+    """
     print(f"\n=== Generating ERD for {len(structure)} tables ===")
     
     # Start with markdown code block like Weaviate
@@ -933,119 +847,6 @@ def generate_mermaid_erd(structure: dict) -> str:
     
     print(f"Generated ERD with {relationship_count} relationships")
     return "\n".join(mermaid_lines)
-
-def validate_sql_query(sql: str, db_path: str) -> tuple[bool, str, dict]:
-    """
-    Validate SQL query for safety and correctness.
-    
-    Args:
-        sql (str): SQL query to validate
-        db_path (str): Path to SQLite database
-        
-    Returns:
-        tuple[bool, str, dict]: (is_valid, error_message, metadata)
-            - is_valid: True if query is safe and valid
-            - error_message: Description of any issues found
-            - metadata: Additional information about the query
-    """
-    try:
-        # 1. Basic safety checks
-        
-        # Remove SQL comments before checking for write operations
-        sql_no_comments = re.sub(r'--.*$', '', sql, flags=re.MULTILINE)  # Remove single line comments
-        sql_no_comments = re.sub(r'/\*.*?\*/', '', sql_no_comments, flags=re.DOTALL)  # Remove multi-line comments
-        sql_lower = sql_no_comments.lower().strip()
-        
-        # Check for write operations
-        write_operations = ['insert', 'update', 'delete', 'drop', 'alter', 'create']
-        for op in write_operations:
-            if sql_lower.startswith(op) or f' {op} ' in sql_lower:
-                return False, f"Write operation '{op}' is not allowed", {}
-        
-        # 2. Connect to database for deeper validation
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        # 3. Get schema information
-        tables = {}
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        for (table_name,) in cursor.fetchall():
-            cursor.execute(f"PRAGMA table_info({table_name})")
-            tables[table_name] = {row[1]: row[2] for row in cursor.fetchall()}
-        
-        # 4. Explain query plan to validate syntax and references
-        try:
-            cursor.execute(f"EXPLAIN QUERY PLAN {sql}")
-            plan = cursor.fetchall()
-            
-            # Extract referenced tables from plan
-            referenced_tables = set()
-            for row in plan:
-                plan_detail = row[3].lower()
-                for table in tables.keys():
-                    if table.lower() in plan_detail:
-                        referenced_tables.add(table)
-            
-            metadata = {
-                'referenced_tables': list(referenced_tables),
-                'schema': {t: list(cols.keys()) for t, cols in tables.items()},
-                'plan': plan
-            }
-            
-            return True, "", metadata
-            
-        except sqlite3.Error as e:
-            return False, f"SQL syntax error: {str(e)}", {}
-            
-    except Exception as e:
-        return False, f"Validation error: {str(e)}", {}
-        
-    finally:
-        if 'conn' in locals():
-            conn.close()
-
-def execute_sql_query(query: str, db_path: str) -> Tuple[pd.DataFrame, str]:
-    """Execute SQL query and return results with metadata."""
-    try:
-        # First validate the query
-        is_valid, error_msg, metadata = validate_sql_query(query, db_path)
-        if not is_valid:
-            raise Exception(error_msg)
-        
-        db = DatabaseManager(db_path)
-        
-        # First, explain the query
-        explain = db.execute_query(f"EXPLAIN QUERY PLAN {query}")
-        plan = "\n".join([str(row) for row in explain])
-        
-        # Then execute it
-        results = db.execute_query(query)
-        df = pd.DataFrame(results.fetchall(), columns=[desc[0] for desc in results.description])
-        
-        # Format table with proper markdown code block
-        preview = "\n\n```\n" + df.head().to_string() + "\n```\n\n"
-        
-        metadata = {
-            'rows': len(df),
-            'columns': list(df.columns),
-            'execution_plan': plan
-        }
-        
-        return df, metadata, preview  # Note: now returns 3 items
-            
-    except Exception as e:
-        raise Exception(f"Query execution failed: {str(e)}")
-
-def store_successful_query(query_id: str, sql: str, metadata: dict) -> dict:
-    """Store a successful query execution and its results."""
-    return {
-        'query_id': query_id,
-        'sql': sql,
-        'metadata': {
-            **metadata,
-            'execution_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        }
-    }
 
 ####################################
 #
@@ -1385,24 +1186,52 @@ def handle_upload_error(filename: str, error: Exception) -> str:
     return f"Error processing {filename}: {str(error)}"
 
 def validate_dataset(df: pd.DataFrame, filename: str) -> tuple[bool, str]:
-    """
-    Validate dataset structure and content.
-
-    Performs checks for:
-    - Empty dataframes
-    - Duplicate column names
-    - Duplicate index values
-
+    """Validate dataset content and structure for analysis compatibility.
+    
+    Performs comprehensive dataset validation including:
+    1. Structure Validation:
+       - Non-empty dataframe check
+       - Column name uniqueness
+       - Index uniqueness and validity
+       - Data type consistency
+       
+    2. Content Quality:
+       - Missing value detection
+       - Duplicate row detection
+       - Invalid value checks
+       - Data type compatibility
+       
+    3. Resource Requirements:
+       - Memory usage estimation
+       - Processing requirements
+       - Storage requirements
+       - Performance impact
+       
+    4. Analysis Readiness:
+       - Numeric column presence
+       - Categorical column validity
+       - Date/time format validity
+       - String column encoding
+       
     Args:
         df (pd.DataFrame): DataFrame to validate
-        filename (str): Name of the file being validated
-
+        filename (str): Original filename for error reporting
+        
     Returns:
-        tuple[bool, str]: (is_valid, error_message)
-
-    Example:
-        >>> is_valid, msg = validate_dataset(df, "data.csv")
-        >>> if not is_valid: print(msg)
+        tuple[bool, str]: Contains:
+            - is_valid (bool): Whether dataset passes all checks
+            - message (str): Success message or error details
+            
+    Raises:
+        ValueError: For critical validation failures
+        TypeError: For data type incompatibilities
+        MemoryError: For resource limit violations
+        
+    Note:
+        - Validation is ordered by importance
+        - Early termination on critical failures
+        - Memory checks prevent OOM situations
+        - Error messages are user-friendly
     """
 
     if df.empty:
@@ -1441,7 +1270,55 @@ def validate_dataset(df: pd.DataFrame, filename: str) -> tuple[bool, str]:
     prevent_initial_call='initial_duplicate'
 )
 def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, selected_dataset, database_state, database_structure_store, successful_queries):
-    """Process chat messages and handle various command types."""
+    """Process and route chat messages through the application's service architecture.
+    
+    This is the main callback function for the chat interface. It:
+    1. Routes messages to appropriate service handlers
+    2. Manages chat history and state updates
+    3. Handles service responses and visualizations
+    4. Processes LLM responses when needed
+    5. Manages dataset and database interactions
+    
+    Flow:
+    1. Validates input and initializes state
+    2. Detects appropriate service handlers
+    3. Executes service-specific logic
+    4. Updates chat history and UI state
+    5. Processes LLM response if needed
+    
+    Args:
+        n_clicks (int): Button click counter trigger
+        input_value (str): User's chat message text
+        chat_history (list): Previous chat messages and responses
+        model (str): Selected AI model identifier
+        datasets (dict): Currently loaded datasets and metadata
+        selected_dataset (str): Name of currently selected dataset
+        database_state (dict): Current database connection state
+        database_structure_store (dict): Database schema information
+        successful_queries (dict): History of successful query executions
+        
+    Returns:
+        tuple: Contains:
+            - chat_history_children (list): Updated chat UI elements
+            - chat_input_value (str): New input field value
+            - chat_store_data (list): Updated chat history
+            - active_tab (str): Selected tab identifier
+            - viz_state (dict): Visualization state
+            - chat_loading (str): Loading indicator state
+            - successful_queries (dict): Updated query history
+            - datasets (dict): Updated dataset store
+            - dataset_list (list): Updated dataset UI elements
+            
+    Raises:
+        PreventUpdate: When no update is needed
+        Exception: For various processing errors
+        
+    Notes:
+        - Service handlers are detected and executed in priority order
+        - Multiple services handling the same message triggers a warning
+        - LLM processing occurs after service handling
+        - State updates are applied immediately after service execution
+    """
 
     # Initialize return values
     chat_input_value = dash.no_update
@@ -1473,7 +1350,7 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
             chat_history.append(current_message)
             chat_history.append({
                 'role': 'assistant',
-                'content': get_complete_help_message(service_registry)
+                'content': get_help_message(service_registry)
             })
             return (
                 create_chat_elements_batch(chat_history),
@@ -1567,38 +1444,7 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                 )
                 
                 chat_history.append(error_msg.to_chat_message())
-
-        if False:
-            # Create system message with all available context
-            system_message = create_system_message(
-                dataset_info=[{
-                    'name': name,
-                    'rows': len(pd.DataFrame(data['df'])),
-                    'columns': list(pd.DataFrame(data['df']).columns),
-                    'selected': name == selected_dataset
-                } for name, data in datasets.items()] if datasets else [],
-                database_structure=database_structure_store
-            )
-
-            # Use full chat history for context
-            messages = get_context_messages(system_message, chat_history)
-            
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.4,
-                max_tokens=8192
-            )
-            
-            ai_response = response.choices[0].message.content
-            
-            # Process SQL blocks if present
-            if '```sql' in ai_response.lower():
-                ai_response = add_query_ids_to_response(ai_response)
-            
-            chat_history.append({'role': 'assistant', 'content': ai_response})
         
-        # Test ChatLLM service in parallel
         try:
             chat_llm = service_registry.get_service("chat_llm")
             if chat_llm:
@@ -1654,63 +1500,6 @@ def get_weaviate_client():
     except Exception as e:
         print(f"Error connecting to Weaviate: {str(e)}")
         return None
-
-def execute_weaviate_query(query: str, min_score: float = 0.3) -> dict:
-    """Execute a query through weaviate_manager.
-    
-    Args:
-        query: Search query text
-        min_score: Minimum score threshold
-        
-    Returns:
-        Dict containing query results or empty dict if no results/error
-    """
-    print("\n=== Weaviate Query Debug ===")
-    print(f"Query: '{query}'")
-    print(f"Min score: {min_score}")
-    
-    try:
-        connection = WeaviateConnection()
-        with connection.get_client() as client:
-            if not client:
-                print("Error: No Weaviate client available")
-                return {}
-            
-            print("Client connection successful")
-            
-            # Use the QueryManager from weaviate_manager
-            query_manager = QueryManager(client)
-            print("QueryManager initialized")
-            
-            print("Executing comprehensive search...")
-            results = query_manager.comprehensive_search(
-                query_text=query,
-                search_type="hybrid",
-                min_score=min_score,
-                unify_results=True,  # Get unified article view
-                verbose=True  # For debugging
-            )
-            
-            print("\nSearch Results:")
-            print(f"- Raw results: {bool(results)}")
-            print(f"- Has unified_results: {bool(results and 'unified_results' in results)}")
-            if results and 'unified_results' in results:
-                print(f"- Number of unified results: {len(results['unified_results'])}")
-                if results['unified_results']:
-                    first_result = results['unified_results'][0]
-                    print(f"- First result score: {first_result.get('score', 'N/A')}")
-                    print(f"- First result collection: {first_result.get('collection', 'N/A')}")
-            
-            if not results or not results.get('unified_results'):
-                print("No results found")
-                return {}
-                
-            return results
-            
-    except Exception as e:
-        print(f"Error in execute_weaviate_query: {str(e)}")
-        print(f"Error traceback: {traceback.format_exc()}")
-        return {}
 
 ####################################
 #
@@ -1791,24 +1580,58 @@ def handle_dataset_upload(
     list_of_dates: List[str], 
     existing_datasets: Dict[str, Any]
 ) -> Tuple[Dict[str, Any], List[Any], str]:
-    """Process uploaded datasets, including zip files.
+    """Process and validate uploaded dataset files.
     
+    Handles multiple file uploads with comprehensive validation:
+    1. File Format Support:
+       - CSV files with automatic delimiter detection
+       - TSV files with tab delimiter
+       - ZIP archives containing multiple CSV/TSV files
+       - Handles various text encodings (UTF-8, Latin1, etc.)
+       
+    2. Data Processing:
+       - Automatic data type inference
+       - Missing value standardization
+       - Column name cleaning
+       - Index handling and validation
+       
+    3. Profile Generation:
+       - Statistical profiling of datasets
+       - Column type analysis
+       - Distribution analysis
+       - Correlation detection
+       
+    4. Memory Management:
+       - Efficient data loading
+       - Memory usage monitoring
+       - Resource limit enforcement
+       
     Args:
-        list_of_contents: Base64 encoded file contents
-        list_of_names: Original filenames
-        list_of_dates: File modification dates
-        existing_datasets: Currently loaded datasets
+        list_of_contents (Optional[List[str]]): Base64 encoded file contents
+        list_of_names (List[str]): Original filenames
+        list_of_dates (List[str]): File modification timestamps
+        existing_datasets (Dict[str, Any]): Currently loaded datasets
         
     Returns:
         Tuple containing:
-        - Updated datasets store
-        - List of dataset card components
-        - Upload status message
-        
+            - datasets_store (Dict[str, Any]): Updated dataset store with:
+                - df: DataFrame as records
+                - metadata: Dataset information
+                - profile_report: Generated profile report
+            - dataset_list (List[Any]): Updated UI components
+            - upload_status (str): Status message for display
+            
     Raises:
+        PreventUpdate: If no files are provided
         pd.errors.EmptyDataError: If uploaded file contains no data
         UnicodeDecodeError: If file encoding is not supported
         pd.errors.ParserError: If file format is invalid
+        
+    Note:
+        - Handles multiple files simultaneously
+        - Preserves existing datasets
+        - Updates UI components automatically
+        - Generates comprehensive profile reports
     """
     if list_of_contents is None:
         return dash.no_update, dash.no_update, ""
@@ -1987,25 +1810,49 @@ def handle_dataset_upload(
     return datasets, dataset_list if dataset_list else [], error_message
 
 def process_dataframe(df: pd.DataFrame, filename: str) -> pd.DataFrame:
-    """
-    Process dataframe to handle missing values and type inference.
+    """Process and clean a DataFrame for analysis and visualization.
     
-    Performs the following operations:
-    1. Replaces various missing value indicators with NaN
-    2. Attempts to convert string columns to numeric where appropriate
-    3. Handles basic data cleaning and standardization
+    Performs comprehensive data cleaning and standardization:
+    1. Missing Value Handling:
+       - Standardizes various missing value indicators to NaN
+       - Handles empty strings and special characters
+       - Processes 'None', 'NULL', 'NA' variations
+       
+    2. Data Type Inference:
+       - Attempts automatic type conversion for numeric columns
+       - Preserves string columns that appear numeric but aren't
+       - Handles mixed-type columns appropriately
+       
+    3. Column Standardization:
+       - Removes special characters from column names
+       - Ensures consistent naming conventions
+       - Handles duplicate column names
+       
+    4. Data Validation:
+       - Checks for data integrity
+       - Validates numeric conversions
+       - Ensures consistent data types
     
     Args:
-        df (pd.DataFrame): Input dataframe to process
+        df (pd.DataFrame): Input DataFrame to process
         filename (str): Original filename for error reporting
         
     Returns:
-        pd.DataFrame: Processed dataframe with standardized missing values
-        and appropriate data types
-        
+        pd.DataFrame: Processed DataFrame with:
+            - Standardized missing values
+            - Appropriate data types
+            - Cleaned column names
+            - Validated data integrity
+            
     Raises:
-        ValueError: If dataframe cannot be properly processed
+        ValueError: If DataFrame cannot be properly processed
         TypeError: If column type conversion fails
+        
+    Notes:
+        - Preserves original data when conversion is uncertain
+        - Logs warnings for potentially problematic conversions
+        - Maintains column order from original DataFrame
+        - Handles international number formats
     """
     try:
         # Define common missing value indicators
@@ -2117,8 +1964,51 @@ def delete_dataset(n_clicks, datasets, selected_dataset):
     [State('datasets-store', 'data')]
 )
 def render_tab_content(active_tab, selected_dataset, datasets):
-    """Render content for dataset tabs."""
+    """Render content for the selected dataset tab.
     
+    This callback manages dataset tab content rendering:
+    1. Content Types:
+       - Data preview with pagination
+       - Statistical summaries
+       - Profile reports
+       - Visualization options
+       - Database connections
+       
+    2. Tab Management:
+       - Handles tab switching
+       - Maintains tab state
+       - Updates active content
+       - Manages tab history
+       
+    3. Dataset Integration:
+       - Links to selected dataset
+       - Updates on dataset changes
+       - Handles missing datasets
+       - Manages data access
+       
+    4. UI Components:
+       - Generates data tables
+       - Creates summary cards
+       - Builds visualization options
+       - Manages layout
+       
+    Args:
+        active_tab (str): Currently selected tab identifier
+        selected_dataset (str): Name of selected dataset
+        datasets (dict): Available datasets and their metadata
+        
+    Returns:
+        list: List of Dash components for the active tab
+        
+    Raises:
+        PreventUpdate: If no tab is selected or no dataset available
+        
+    Note:
+        - Handles multiple content types
+        - Maintains responsive layout
+        - Optimizes component rendering
+        - Preserves user selections
+    """
     if not datasets:
         return "No datasets selected"
         
@@ -2286,7 +2176,45 @@ def download_selected_datasets(n_clicks, selected_datasets, all_datasets):
     prevent_initial_call=True
 )
 def handle_dataset_selection(n_clicks, datasets, chat_store):
-    """Handle dataset selection and process any pending plot requests."""
+    """Handle dataset selection and update application state.
+    
+    This callback manages dataset selection events and their effects:
+    1. Dataset State Management:
+       - Updates selected dataset
+       - Manages dataset preview state
+       - Updates chat context
+       
+    2. UI Updates:
+       - Updates dataset cards
+       - Switches to preview tab
+       - Updates chat history
+       
+    3. Context Management:
+       - Adds dataset context to chat
+       - Updates analysis state
+       - Prepares for new analysis
+       
+    Args:
+        n_clicks (List[int]): Click counts for dataset cards
+        datasets (Dict[str, Any]): Available datasets with metadata
+        chat_store (Dict[str, Any]): Current chat history and state
+        
+    Returns:
+        tuple: Contains:
+            - selected_dataset (str): Newly selected dataset
+            - chat_history (List[dict]): Updated chat messages
+            - chat_store (dict): Updated chat state
+            - active_tab (str): New active tab selection
+            
+    Raises:
+        PreventUpdate: If no dataset is selected
+        
+    Note:
+        - Maintains chat context across selections
+        - Updates UI to reflect new selection
+        - Prepares environment for analysis
+        - Handles multiple dataset formats
+    """
     if not any(n_clicks):
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
         
@@ -2379,450 +2307,7 @@ def update_dataset_stats(datasets):
         memory_text = f"Error calculating memory usage: {str(e)}"
     
     return f"({dataset_count})", memory_text
-
-####################################
-#
-# Query Management Functions
-#
-####################################
-
-@callback(
-    [Output('chat-history', 'children', allow_duplicate=True),
-     Output('chat-input', 'value', allow_duplicate=True),
-     Output('chat-store', 'data', allow_duplicate=True),
-     Output('dataset-tabs', 'active_tab', allow_duplicate=True),
-     Output('viz-state-store', 'data', allow_duplicate=True),
-     Output('chat-loading-output', 'children', allow_duplicate=True),
-     Output('successful-queries-store', 'data', allow_duplicate=True),
-     Output('datasets-store', 'data', allow_duplicate=True),
-     Output('dataset-list', 'children', allow_duplicate=True)],
-    [Input('chat-input', 'value'),
-     Input('send-button', 'n_clicks')],
-    [State('chat-store', 'data'),
-     State('database-state', 'data'),
-     State('database-structure-store', 'data'),
-     State('successful-queries-store', 'data'),
-     State('datasets-store', 'data'),
-     State('selected-dataset-store', 'data')],
-    prevent_initial_call='initial_duplicate'
-)
-def execute_confirmed_query(input_value, n_clicks, chat_history, database_state, database_structure_store, successful_queries, datasets, selected_dataset):
-    """Process chat commands related to SQL query execution and dataset conversion."""
-    if not input_value:
-        return (dash.no_update,) * 9
-
-    # Temporarily disable query execution while testing service
-    return (dash.no_update,) * 9
-
-    # Initialize stores safely
-    successful_queries = successful_queries or {}
-    chat_history = chat_history or []
-    datasets = datasets or {}
-    
-    # Check for dataset information request
-    dataset_query = re.search(r'tell\s+me\s+about\s+my\s+(dataset|datasets)\b', input_value.lower())
-    if dataset_query:
-        chat_history.append({'role': 'user', 'content': input_value})
-        
-        if not datasets:
-            chat_history.append({
-                'role': 'assistant',
-                'content': "No datasets are currently loaded. Please upload a dataset first."
-            })
-            return (
-                create_chat_elements_batch(chat_history),
-                dash.no_update,  # Changed from '' to dash.no_update
-                chat_history,
-                dash.no_update,
-                dash.no_update,
-                "",
-                successful_queries,
-                dash.no_update,
-                dash.no_update
-            )
-            
-        # Show all datasets unless specifically asking about single dataset and one is selected
-        show_all = dataset_query.group(1) == 'datasets' or not selected_dataset
-        
-        if show_all:
-            # Generate overview of all datasets
-            overview = ["Here are the currently loaded datasets:"]
-            for name, data in datasets.items():
-                df = pd.DataFrame(data['df'])
-                metadata = data['metadata']
-                dataset_info = f"""
-{name}{'  (Selected)' if name == selected_dataset else ''}
-- Source: {metadata['source']}
-- Upload time: {metadata['upload_time']}
-- Rows: {len(df)}
-- Columns: {', '.join(df.columns)}
-"""
-                overview.append(dataset_info)
-            
-            if selected_dataset:
-                overview.append(f"\nCurrently selected dataset: {selected_dataset}")
-            else:
-                overview.append("\nNo dataset is currently selected. Click a dataset name to select it.")
-                
-            chat_history.append({
-                'role': 'assistant',
-                'content': '\n'.join(overview)
-            })
-        else:
-            # Show detailed info for selected dataset
-            df = pd.DataFrame(datasets[selected_dataset]['df'])
-            metadata = datasets[selected_dataset]['metadata']
-            summary = f"""Dataset: {selected_dataset}
-
-Source: {metadata['source']}
-Upload time: {metadata['upload_time']}
-Rows: {len(df)}
-Columns: {', '.join(df.columns)}
-
-Preview:
-```
-{df.head().to_string()}
-```
-
-Data Types:
-{df.dtypes.to_string()}
-
-Summary Statistics:
-{df.describe().to_string()}
-"""
-            chat_history.append({
-                'role': 'assistant',
-                'content': summary
-            })
-            
-        return (
-            create_chat_elements_batch(chat_history),
-            dash.no_update,  # Changed from '' to dash.no_update
-            chat_history,
-            dash.no_update,
-            dash.no_update,
-            "",
-            successful_queries,
-            dash.no_update,
-            dash.no_update
-        )
-        
-    # Check for dataset conversion request
-    convert_match = re.search(r'convert\s+((query|lit_query)_\d{8}_\d{6}(?:_original|_alt\d+)?)\s+to\s+dataset', input_value.lower().strip())
-    if convert_match:
-        query_id = convert_match.group(1)
-        print(f"\nProcessing dataset conversion request for query: {query_id}")
-        
-        # Add command to chat history
-        chat_history.append({
-            'role': 'user',
-            'content': input_value
-        })
-        
-        # Check if query exists in store
-        if query_id not in successful_queries:
-            print(f"Error: Query {query_id} not found in store")
-            chat_history.append({
-                'role': 'assistant',
-                'content': f"❌ Query {query_id} not found in history. Please execute the query first."
-            })
-            return (
-                create_chat_elements_batch(chat_history),  # chat-history
-                dash.no_update,  # Changed from '' to dash.no_update
-                chat_history,                              # chat-store
-                dash.no_update,                           # dataset-tabs
-                dash.no_update,                           # viz-state-store
-                "",                                       # chat-loading-output
-                successful_queries,                       # successful-queries-store
-                dash.no_update,                           # datasets-store
-                dash.no_update                            # dataset-list
-            )
-            
-        try:
-            print(f"Converting query {query_id} to dataset...")
-            stored_query = successful_queries[query_id]
-            
-            if query_id.startswith('lit_query_'):
-                # Handle literature query conversion
-                print("Processing literature query conversion")
-                df = pd.DataFrame(stored_query['dataframe'])  # Ensure we have a DataFrame
-                metadata = {
-                    'filename': f"{query_id}.csv",
-                    'source': f"Literature query: {stored_query['query']}",
-                    'threshold': stored_query['threshold'],
-                    'execution_time': stored_query['metadata']['execution_time'],
-                    'query_info': stored_query['metadata']['query_info'],
-                    'summary': stored_query['metadata']['summary'],
-                    'rows': len(df),
-                    'columns': [df.index.name or 'index'] + list(df.columns)
-                }
-            else:
-                # Handle SQL query conversion
-                print("Processing SQL query conversion")
-                df, metadata, _ = execute_sql_query(stored_query['sql'], database_state['path'])
-                metadata = {
-                    'filename': f"{query_id}.csv",
-                    'source': f"Database query: {query_id}",
-                    'database': database_state['path'],
-                    'sql': stored_query['sql'],
-                    'execution_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'rows': len(df),
-                    'columns': [df.index.name or 'index'] + list(df.columns)
-                }
-            
-            print(f"Query executed successfully: {len(df)} rows retrieved")
-            
-            # Create dataset name (avoid duplicates)
-            base_name = f"{query_id}"
-            dataset_name = base_name
-            counter = 1
-            while dataset_name in datasets:
-                dataset_name = f"{base_name}_{counter}"
-                counter += 1
-            print(f"Using dataset name: {dataset_name}")
-            
-            # Generate profile report
-            try:
-                print("Generating profile report...")
-                profile = ProfileReport(
-                    df,
-                    minimal=True,
-                    title=f"Profile Report for {dataset_name}",
-                    html={'style': {'full_width': True}},
-                    progress_bar=False,
-                    correlations={'pearson': {'calculate': True}},
-                    missing_diagrams={'matrix': False},
-                    samples=None
-                )
-                profile_html = profile.to_html()
-                print("Profile report generated successfully")
-            except Exception as e:
-                print(f"Warning: Profile report generation failed: {str(e)}")
-                profile_html = None
-            
-            # Create dataset with special metadata
-            datasets[dataset_name] = {
-                'df': df.reset_index().to_dict('records'),
-                'metadata': metadata,
-                'profile_report': profile_html
-            }
-            print(f"Dataset '{dataset_name}' created successfully")
-            
-            # Add text search indexing for the new dataset
-            try:
-                text_searcher.update_dataset(dataset_name, df)
-                print(f"Text search index updated for dataset '{dataset_name}'")
-            except Exception as e:
-                print(f"Warning: Failed to update text search index: {str(e)}")
-            
-            # Create success message
-            chat_history.append({
-                'role': 'assistant',
-                'content': f"✅ Query results converted to dataset '{dataset_name}'\n\n"
-                          f"- Rows: {len(df)}\n"
-                          f"- Columns: {', '.join(df.columns)}\n"
-                          f"- Source: Query {query_id}"
-            })
-            
-            # Create updated dataset list
-            dataset_list = [create_dataset_card(name, data) for name, data in datasets.items()]
-            print("Dataset list updated")
-            
-            return (
-                create_chat_elements_batch(chat_history),  # chat-history
-                dash.no_update,  # Changed from '' to dash.no_update
-                chat_history,                              # chat-store
-                dash.no_update,                           # dataset-tabs
-                dash.no_update,                           # viz-state-store
-                "",                                       # chat-loading-output
-                successful_queries,                       # successful-queries-store
-                datasets,                                 # datasets-store
-                dataset_list                              # dataset-list
-            )
-            
-        except Exception as e:
-            print(f"Error: Dataset conversion failed: {str(e)}")
-            chat_history.append({
-                'role': 'system',
-                'content': f"❌ Error converting query to dataset: {str(e)}"
-            })
-            return (
-                create_chat_elements_batch(chat_history),  # chat-history
-                dash.no_update,  # Changed from '' to dash.no_update
-                chat_history,                              # chat-store
-                dash.no_update,                           # dataset-tabs
-                dash.no_update,                           # viz-state-store
-                "",                                       # chat-loading-output
-                successful_queries,                       # successful-queries-store
-                dash.no_update,                           # datasets-store
-                dash.no_update                            # dataset-list
-            )
-    
-    # Handle query execution
-    input_lower = input_value.lower().strip()
-    
-    # Check execution command type
-    is_simple_command = (
-        input_lower.startswith(('execute', 'run', 'query')) and
-        len(input_lower.split()) == 1 and
-        any(input_lower.endswith(char) for char in ['.', '!'])
-    )
-    
-    query_match = re.search(r'^execute\s+query_\d{8}_\d{6}(_original|_alt\d+)\b', input_lower)
-    is_query_reference = bool(query_match)
-    
-    if not (is_simple_command or is_query_reference):
-        return (
-            dash.no_update,                           # chat-history
-            dash.no_update,  # Changed from '' to dash.no_update
-            dash.no_update,                           # chat-store
-            dash.no_update,                           # dataset-tabs
-            dash.no_update,                           # viz-state-store
-            "",                                       # chat-loading-output
-            successful_queries,                       # successful-queries-store
-            dash.no_update,                           # datasets-store
-            dash.no_update                            # dataset-list
-        )
-        
-    print("\nProcessing query execution command...")
-    print(f"- Simple command: {is_simple_command}")
-    print(f"- Query reference: {is_query_reference}")
-    
-    # Add command to chat history
-    chat_history.append({
-        'role': 'user',
-        'content': input_value
-    })
-    
-    # Find the query to execute
-    sql_query = None
-    found_id = None
-    
-    if is_query_reference:
-        target_query_id = input_lower[8:].strip()  # Remove 'execute ' prefix
-        print(f"\nLooking for specific query: {target_query_id}")
-        # Search for specific query ID
-        for msg in reversed(chat_history):
-            if msg['role'] == 'assistant' and '```sql' in msg['content'].lower():
-                content = msg['content']
-                for match in re.finditer(r'```sql\s*(.*?)```', content, re.DOTALL):
-                    block = match.group(1).strip()
-                    id_match = re.search(r'--\s*Query ID:\s*((query_\d{8}_\d{6})(_original|_alt\d+))\b', block)
-                    if id_match and id_match.group(1) == target_query_id:
-                        found_id = target_query_id
-                        sql_query = '\n'.join(
-                            line for line in block.split('\n')
-                            if not line.strip().startswith('-- Query ID:')
-                        ).strip()
-                        print(f"Found matching query with ID: {found_id}")
-                        break
-                if sql_query:
-                    break
-    else:
-        print("\nLooking for most recent original query...")
-        # Find most recent original query
-        for msg in reversed(chat_history):
-            if msg['role'] == 'assistant' and '```sql' in msg['content'].lower():
-                content = msg['content']
-                for match in re.finditer(r'```sql\s*(.*?)```', content, re.DOTALL):
-                    block = match.group(1).strip()
-                    id_match = re.search(r'--\s*Query ID:\s*((query_\d{8}_\d{6})(_original))\b', block)
-                    if id_match:
-                        found_id = id_match.group(1)
-                        sql_query = '\n'.join(
-                            line for line in block.split('\n')
-                            if not line.strip().startswith('-- Query ID:')
-                        ).strip()
-                        print(f"Found original query with ID: {found_id}")
-                        break
-                if sql_query:
-                    break
-    
-    if not sql_query:
-        print("No matching SQL query found")
-        chat_history.append({
-            'role': 'assistant',
-            'content': "No matching SQL query found in chat history."
-        })
-        return (
-            create_chat_elements_batch(chat_history),  # chat-history
-            dash.no_update,  # Changed from '' to dash.no_update
-            chat_history,                              # chat-store
-            dash.no_update,                           # dataset-tabs
-            dash.no_update,                           # viz-state-store
-            "",                                       # chat-loading-output
-            successful_queries,                       # successful-queries-store
-            dash.no_update,                           # datasets-store
-            dash.no_update                            # dataset-list
-        )
-
-    try:
-        print(f"\nExecuting SQL query...")
-        print(f"Query:\n{sql_query}")
-        
-        # Execute the query
-        results, metadata, preview = execute_sql_query(sql_query, database_state['path'])
-        print(f"Query executed successfully: {metadata['rows']} rows returned")
-        
-        # Store successful query
-        successful_queries[found_id] = store_successful_query(
-            query_id=found_id,
-            sql=sql_query,
-            metadata=metadata
-        )
-        print(f"Query stored with ID: {found_id}")
-        
-        # Format response
-        response = f"""Query executed successfully!
-
-Results preview:
-
-Query ID: {found_id}
-{preview}
-
-Total rows: {metadata['rows']}
-
-Execution plan:
-{metadata['execution_plan']}
-
-Would you like to save these results as a dataset?"""
-        
-        chat_history.append({
-            'role': 'assistant',
-            'content': response
-        })
-        
-        return (
-            create_chat_elements_batch(chat_history),  # chat-history
-            dash.no_update,  # Changed from '' to dash.no_update
-            chat_history,                              # chat-store
-            dash.no_update,                           # dataset-tabs
-            dash.no_update,                           # viz-state-store
-            "",                                       # chat-loading-output
-            successful_queries,                       # successful-queries-store
-            dash.no_update,                           # datasets-store
-            dash.no_update                            # dataset-list
-        )
-        
-    except Exception as e:
-        print(f"Error executing query: {str(e)}")
-        chat_history.append({
-            'role': 'system',
-            'content': f"Query execution failed: {str(e)}"
-        })
-        return (
-            create_chat_elements_batch(chat_history),  # chat-history
-            dash.no_update,  # Changed from '' to dash.no_update
-            chat_history,                              # chat-store
-            dash.no_update,                           # dataset-tabs
-            dash.no_update,                           # viz-state-store
-            "",                                       # chat-loading-output
-            successful_queries,                       # successful-queries-store
-            dash.no_update,                           # datasets-store
-            dash.no_update                            # dataset-list
-        )
-
-    
+ 
 ####################################
 #
 # Help Message Callback
@@ -2839,41 +2324,23 @@ Would you like to save these results as a dataset?"""
     prevent_initial_call=True
 )
 def show_help(n_clicks, chat_history):
-    """
-    Show help message in chat when help button is clicked.
-    """
+    """Show help message in chat when help button is clicked."""
     if not n_clicks:
         return dash.no_update, dash.no_update, dash.no_update
     
-    # Initialize chat history if empty
     chat_history = chat_history or []
     
-    # Add help request to chat history
     chat_history.append({
         'role': 'user',
         'content': "What can I do with this chat interface?"
     })
     
-    # Add help message response
     chat_history.append({
         'role': 'assistant',
-        'content': get_complete_help_message(service_registry)
+        'content': get_help_message(service_registry)
     })
     
     return dash.no_update, chat_history, create_chat_elements_batch(chat_history)
-
-def is_dataset_query(message: str) -> bool:
-    """Check if the message is asking about a dataset."""
-    query_patterns = [
-        r'tell me about',
-        r'describe',
-        r'what is',
-        r'explain',
-        r'show me',
-        r'information about'
-    ]
-    message = message.lower()
-    return any(pattern in message for pattern in query_patterns)
 
 # Move all callbacks before main
 @callback(
@@ -2882,7 +2349,53 @@ def is_dataset_query(message: str) -> bool:
     Input('viz-state-store', 'data')
 )
 def update_visualization(viz_state):
-    """Update visualization when state changes."""
+    """Update visualization based on stored visualization state.
+    
+    This callback manages visualization updates by:
+    1. State Management:
+       - Retrieves current visualization state
+       - Validates state completeness
+       - Handles missing or invalid states
+       
+    2. Figure Processing:
+       - Applies stored view settings
+       - Updates layout properties
+       - Manages figure dimensions
+       - Handles annotations and shapes
+       
+    3. View Persistence:
+       - Maintains zoom levels
+       - Preserves pan positions
+       - Retains axis ranges
+       - Keeps user-added shapes
+       
+    4. Error Handling:
+       - Validates figure data
+       - Handles missing components
+       - Provides fallback options
+       - Reports debug information
+       
+    Args:
+        viz_state (dict): Current visualization state containing:
+            - figure: Plotly figure data
+            - type: Visualization type
+            - params: Additional parameters
+            - view_settings: User view preferences
+            
+    Returns:
+        tuple: Contains:
+            - figure (dict): Updated Plotly figure
+            - debug_info (str): Debug information for development
+            
+    Raises:
+        PreventUpdate: If no valid state is provided
+        
+    Note:
+        - Maintains interactive features
+        - Preserves user customizations
+        - Handles multiple chart types
+        - Optimizes for performance
+    """
     if not viz_state:
         return {'data': [], 'layout': {'title': 'No visualization selected'}}, "No visualization state"
     
@@ -2903,26 +2416,71 @@ def update_visualization(viz_state):
     prevent_initial_call=True
 )
 def update_figure_state(relayout_data, figure_data, viz_state):
-    """Store figure view state when user interacts with the plot."""
-    if not viz_state:
-        raise PreventUpdate
+    """Store and manage figure view state during user interactions.
+    
+    This callback captures and persists visualization state changes:
+    1. View Settings:
+       - Zoom levels and ranges
+       - Pan positions
+       - Axis domains
+       - Layout properties
+       
+    2. Figure Elements:
+       - Annotations
+       - Shapes
+       - Traces visibility
+       - Legend state
+       
+    3. User Customizations:
+       - Added shapes or annotations
+       - Modified axis properties
+       - Custom color schemes
+       - Layout adjustments
+       
+    4. State Management:
+       - Initializes missing state
+       - Updates changed properties
+       - Preserves unchanged settings
+       - Validates state integrity
+       
+    Args:
+        relayout_data (dict): User interaction data from Plotly
+        figure_data (dict): Current figure state and data
+        viz_state (dict): Existing visualization state
         
-    # Initialize view settings if not present
-    if not viz_state.get('view_settings'):
-        viz_state['view_settings'] = {}
+    Returns:
+        dict: Updated visualization state containing:
+            - view_settings: User view preferences
+            - figure_properties: Current figure state
+            - custom_elements: User-added elements
+            
+    Raises:
+        PreventUpdate: If no state changes are needed
+        
+    Note:
+        - Handles partial updates efficiently
+        - Preserves user customizations
+        - Maintains state consistency
+        - Optimizes for performance
+    """
+    if not relayout_data and not figure_data:
+        return viz_state
     
-    # Update from relayoutData
+    # Update view settings
     if relayout_data:
-        # Store relevant view settings (zoom, center, etc.)
-        for key in relayout_data:
-            if any(k in key for k in ['zoom', 'center', 'range', 'domain', 'shapes']):
-                viz_state['view_settings'][key] = relayout_data[key]
+        for key, value in relayout_data.items():
+            if key in ['zoom', 'pan', 'xaxis.range', 'yaxis.range', 'shapes']:
+                viz_state['view_settings'][key] = value
     
-    # Update from figure data
+    # Update figure properties
     if figure_data and 'layout' in figure_data:
-        # Store shapes from the figure
-        if 'shapes' in figure_data['layout']:
-            viz_state['view_settings']['shapes'] = figure_data['layout']['shapes']
+        for key, value in figure_data['layout'].items():
+            if key in ['title', 'xaxis.title', 'yaxis.title', 'legend.title']:
+                viz_state['figure_properties'][key] = value
+    
+    # Update custom elements
+    if 'shapes' in figure_data['layout']:
+        viz_state['custom_elements'] = figure_data['layout']['shapes']
     
     return viz_state
 
@@ -2938,7 +2496,38 @@ def refresh_database_list(n_clicks):
     return get_database_files(), None  # Reset dropdown selection
 
 def get_database_structure(db_path: str) -> Dict[str, Any]:
-    """Get structure of SQLite database including tables, columns, and relationships."""
+    """Extract and analyze the structure of a SQLite database.
+    
+    Performs comprehensive database analysis including:
+    1. Table enumeration and metadata
+    2. Column definitions and constraints
+    3. Foreign key relationships
+    4. Index configurations
+    5. View definitions
+    
+    Args:
+        db_path (str): Path to SQLite database file
+        
+    Returns:
+        Dict[str, Any]: Database structure information containing:
+            - tables: Dict of table information
+                - name: Table name
+                - columns: List of column definitions
+                - constraints: List of constraints
+                - indexes: List of indexes
+            - relationships: List of foreign key relationships
+            - views: List of view definitions
+            - metadata: Database-level metadata
+            
+    Raises:
+        sqlite3.Error: For database access issues
+        FileNotFoundError: If database file doesn't exist
+        PermissionError: If database file is not accessible
+        
+    Note:
+        This function is used for both visualization (ERD generation)
+        and query processing (schema validation).
+    """
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -2999,10 +2588,45 @@ def get_database_structure(db_path: str) -> Dict[str, Any]:
     prevent_initial_call=True
 )
 def connect_database(n_clicks, db_path, current_state):
-    """Handle database connection attempts."""
+    """Establish and verify a database connection with comprehensive checks.
+    
+    This callback function manages database connections by:
+    1. Validating database file existence and permissions
+    2. Establishing and testing connection
+    3. Extracting and caching database structure
+    4. Initializing text search capabilities
+    5. Updating connection state and UI
+    
+    Connection Process:
+    1. File validation
+    2. Connection establishment
+    3. Schema extraction
+    4. Search index creation
+    5. State management
+    
+    Args:
+        n_clicks (int): Button click counter trigger
+        db_path (str): Path to SQLite database file
+        current_state (dict): Current connection state containing:
+            - connected: bool indicating if connected
+            - path: Current database path
+            - last_update: Timestamp of last update
+            
+    Returns:
+        tuple: Contains:
+            - state (dict): Updated connection state
+            - structure (dict): Database structure information
+            - status (html.Div): Connection status display
+            
+    Note:
+        - Maintains connection state between clicks
+        - Caches database structure for performance
+        - Updates UI to reflect connection status
+        - Initializes search capabilities automatically
+    """
     if not n_clicks or not db_path:
         return (
-            {'connected': False, 'path': None},
+            {'connected': False, 'path': None, 'last_update': datetime.now().isoformat()},
             None,
             html.Div('Please select a database', style={'color': 'red'})
         )
@@ -3031,6 +2655,7 @@ def connect_database(n_clicks, db_path, current_state):
         state = {
             'connected': True,
             'path': db_path,
+            'last_update': datetime.now().isoformat(),
             'has_text_search': True,
             'structure': structure  # Include structure in state
         }
@@ -3046,7 +2671,7 @@ def connect_database(n_clicks, db_path, current_state):
         print(f"Database connection error: {str(e)}")
         print(traceback.format_exc())
         return (
-            {'connected': False, 'path': None, 'has_text_search': False},
+            {'connected': False, 'path': None, 'last_update': datetime.now().isoformat(), 'has_text_search': False},
             None,
             html.Div(f'Connection failed: {str(e)}', style={'color': 'red'})
         )
@@ -3421,189 +3046,6 @@ def update_weaviate_tooltips(state):
     coll_msg = state['collections']['message']
     
     return conn_msg, coll_msg
-
-def generate_query_id(is_original: bool = True, alt_number: Optional[int] = None) -> str:
-    """Generate a unique query ID with timestamp using PreviewIdentifier.
-    
-    Args:
-        is_original (bool): If True, generates ID for primary query
-        alt_number (int, optional): For alternative queries, specifies which alternative (1,2,etc)
-        
-    Returns:
-        str: Query ID in format query_YYYYMMDD_HHMMSS_(orig|altN)
-    """
-    if is_original:
-        return PreviewIdentifier.create_id(prefix="query")
-    else:
-        # For alternatives, we need to create based on the original ID
-        original_id = PreviewIdentifier.create_id(prefix="query")
-        # Then create alternatives from it
-        for _ in range(alt_number or 1):
-            original_id = PreviewIdentifier.create_id(previous_id=original_id)
-        return original_id
-
-def add_query_ids_to_response(response: str) -> str:
-    """Add service-specific IDs to content blocks in LLM response.
-    
-    This function:
-    1. Checks each registered service
-    2. If the service finds its content type in the response,
-       lets the service add its IDs to those blocks
-    
-    This allows each service to handle its own content type and ID format.
-    """
-    modified_response = response
-    
-    # Let each service process its content blocks
-    for service_name, service in service_registry._services.items():
-        if service.detect_content_blocks(modified_response):
-            modified_response = service.add_ids_to_blocks(modified_response)
-            
-    return modified_response
-
-def get_api_response(model: str, system_msg: str, messages: list) -> dict:
-    """Get response from API with proper error handling.
-    
-    Args:
-        model: Model to use for completion
-        system_msg: System message with context
-        messages: List of conversation messages
-        
-    Returns:
-        Dict with response content and metadata
-    """
-    try:
-        # Prepare messages with system context
-        api_messages = [
-            {'role': 'system', 'content': system_msg}
-        ]
-        api_messages.extend(messages)
-        
-        # Get completion
-        response = client.chat.completions.create(
-            model=model,
-            messages=api_messages,
-            temperature=0.7,
-            max_tokens=1000
-        )
-        
-        # Extract response
-        content = response.choices[0].message.content
-        
-        return {
-            'role': 'assistant',
-            'content': content,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-    except Exception as e:
-        print(f"API call error: {str(e)}")
-        return {
-            'role': 'system',
-            'content': f"Error calling API: {str(e)}",
-            'type': 'error'
-        }
-
-def count_tokens(text: str) -> int:
-    """Rough estimate of token count. Each word is approximately 1.3 tokens."""
-    return int(len(text.split()) * 1.3)
-
-def get_context_messages(system_message: str, chat_history: list, max_tokens: int = 8000) -> list:
-    """Get context messages within token limit, prioritizing critical messages.
-    
-    Args:
-        system_message: The system prompt
-        chat_history: Full chat history
-        max_tokens: Maximum tokens to allow
-        
-    Returns:
-        List of messages within token limit, in chronological order
-    """
-    # First count system message tokens
-    system_tokens = count_tokens(system_message)
-    
-    # Reserve tokens for system message and buffer
-    available_tokens = max_tokens - system_tokens - 500  # 500 token buffer
-    
-    if available_tokens <= 0:
-        print(f"Warning: System message is too long ({system_tokens} tokens)")
-        return [{'role': 'system', 'content': system_message}]
-    
-    # Initialize with system message
-    messages = [{'role': 'system', 'content': system_message}]
-    token_count = system_tokens
-    
-    # Find most recent service message and user request
-    recent_service_msg = None
-    recent_user_msg = None
-    
-    for msg in reversed(chat_history):
-        if not recent_service_msg and msg.get('service'):
-            recent_service_msg = msg
-            continue
-        if not recent_user_msg and msg['role'] == 'user':
-            recent_user_msg = msg
-            if recent_service_msg:  # If we have both, stop looking
-                break
-    
-    # Add recent service message if exists
-    if recent_service_msg:
-        service_tokens = count_tokens(recent_service_msg.get('content', ''))
-        if token_count + service_tokens <= max_tokens - 500:
-            messages.append({
-                'role': 'assistant',
-                'content': recent_service_msg.get('content', '')
-            })
-            token_count += service_tokens
-            print(f"Added service message: {service_tokens} tokens")
-    
-    # Add user's request if exists
-    if recent_user_msg:
-        user_tokens = count_tokens(recent_user_msg.get('content', ''))
-        if token_count + user_tokens <= max_tokens - 500:
-            messages.append({
-                'role': 'user',
-                'content': recent_user_msg.get('content', '')
-            })
-            token_count += user_tokens
-            print(f"Added user message: {user_tokens} tokens")
-    
-    # Add other recent context if space remains
-    remaining_tokens = max_tokens - token_count - 500
-    if remaining_tokens > 0:
-        for msg in reversed(chat_history):
-            # Skip messages we already added
-            if msg == recent_service_msg or msg == recent_user_msg:
-                continue
-                
-            msg_tokens = count_tokens(msg.get('content', ''))
-            if token_count + msg_tokens > max_tokens - 500:
-                break
-                
-            # Format service messages
-            if 'service' in msg:
-                content_parts = msg['content'].split('\n\n', 1)
-                content = content_parts[1].strip() if len(content_parts) > 1 else msg['content']
-                messages.append({
-                    'role': 'assistant',
-                    'content': content
-                })
-            else:
-                messages.append({
-                    'role': msg.get('role', 'user'),
-                    'content': msg.get('content', '')
-                })
-            token_count += msg_tokens
-    
-    # Debug output
-    print(f"\n=== Context Window Stats ===")
-    print(f"System message tokens: {system_tokens}")
-    print(f"History tokens: {token_count - system_tokens}")
-    print(f"Total tokens: {token_count}/{max_tokens}")
-    print(f"Messages included: {len(messages)}")
-    print(f"Message types: {[msg['role'] for msg in messages]}")
-    
-    return messages
 
 if __name__ == '__main__':
     # Start the app

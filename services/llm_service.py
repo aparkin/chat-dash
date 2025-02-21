@@ -82,7 +82,7 @@ dotenv_path = project_root / '.env'
 load_dotenv(dotenv_path=dotenv_path)
 
 # OpenAI Settings
-if False:  # Toggle for development environment
+if True:  # Toggle for development environment
     CBORG=True
     OPENAI_BASE_URL = os.getenv('CBORG_BASE_URL', "https://api.cborg.lbl.gov")
     OPENAI_API_KEY = os.getenv('CBORG_API_KEY', '')  # Must be set in environment
@@ -93,7 +93,7 @@ else:  # Production environment
 
 print(f"OPENAI_BASE_URL: {OPENAI_BASE_URL}")
 # TODO: why isn't the above getting the right BASE_URL?
-OPENAI_BASE_URL='https://api.openai.com/v1'
+#OPENAI_BASE_URL='https://api.openai.com/v1'
 
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY environment variable must be set")

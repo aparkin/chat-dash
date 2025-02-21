@@ -954,6 +954,7 @@ Visualization Commands:
    "heatmap columns=[col1,col2,...]" - list specific columns
    "heatmap columns=pattern" - regex pattern for columns
    "heatmap columns=[...] rows=pattern fcol=column" - filter rows
+   Note: When using regex patterns with rows, fcol must specify which column to filter on
    - Optional: standardize=rows|columns
    - Optional: cluster=both|rows|columns
    - Optional: transpose=true|false

@@ -584,7 +584,7 @@ class DatasetService(ChatService, LLMServiceMixin):
             }
             
         # Check for analysis request - use original message to preserve case
-        analysis_match = re.match(r'^analysis:\s*(.+)$', message)
+        analysis_match = re.match(r'^analysis:\s*(.+)$', message, re.IGNORECASE)
         if analysis_match:
             # Get the description from the original message to preserve case
             description_start = original_message.find(':') + 1
