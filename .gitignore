@@ -63,3 +63,14 @@ versions/
 WeaviateQueryManager/
 old_analysis_manager/
 weaviate_manager_history.txt
+
+# Test files
+test_*.py
+*_test.py
+testing/
+
+# Development files
+*_debug.py
+*_temp.py
+temp_*.py
+schema_manager.py
