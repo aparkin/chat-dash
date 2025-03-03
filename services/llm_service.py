@@ -176,20 +176,11 @@ class LLMServiceMixin(ABC):
         )
     
     def _call_llm(self, messages: List[Dict[str, str]], system_prompt: Optional[str] = None) -> str:
-        """Make an API call to the LLM.
-        
-        Args:
-            messages: List of message dictionaries with 'role' and 'content'
-            system_prompt: Optional system prompt to prepend
-            
-        Returns:
-            str: The LLM's response
-            
-        Raises:
-            Exception: If the API call fails
-        """
+        """Make an API call to the LLM."""
         try:
-            print("\n=== Debug: LLM Call ===")
+            print("\n=== Debug: LLM Call ===", flush=True)
+            print(f"Service: {self.service_name}", flush=True)
+            
             # Prepare messages
             formatted_messages = []
             
@@ -199,42 +190,52 @@ class LLMServiceMixin(ABC):
                     "role": "system",
                     "content": system_prompt.strip()
                 })
+                print("\nSystem prompt:", flush=True)
+                print("---", flush=True)
+                print(system_prompt.strip(), flush=True)
+                print("---", flush=True)
             
             # Process and validate each message
             for msg in messages:
                 # Skip system message if we already added system prompt
                 if msg.get("role") == "system" and system_prompt:
+                    print(f"Skipping system message due to system prompt", flush=True)
                     continue
                     
                 content = msg.get('content', '').strip()
                 if not content:  # Skip empty messages
-                    print(f"Warning: Skipping empty message with role {msg.get('role')}")
+                    print(f"Warning: Skipping empty message with role {msg.get('role')}", flush=True)
                     continue
                 
                 # Ensure role is valid
                 role = msg.get("role", "user")
                 if role not in ["system", "user", "assistant"]:
+                    print(f"Warning: Invalid role '{role}', defaulting to 'user'", flush=True)
                     role = "user"  # Default to user for unknown roles
                 
                 formatted_messages.append({
                     "role": role,
                     "content": content
                 })
+                print(f"\nAdded message with role '{role}':", flush=True)
+                print("---", flush=True)
+                print(content, flush=True)
+                print("---", flush=True)
             
             # Ensure we have at least one message
             if not formatted_messages:
                 raise ValueError("No valid messages to send to LLM")
             
-            print(f"Prepared {len(formatted_messages)} messages")
-            print("Message roles:", [m["role"] for m in formatted_messages])
-            print("Message lengths:", [len(m["content"]) for m in formatted_messages])
+            print(f"\nPrepared {len(formatted_messages)} messages", flush=True)
+            print("Message roles:", [m["role"] for m in formatted_messages], flush=True)
+            print("Message lengths:", [len(m["content"]) for m in formatted_messages], flush=True)
             
             # Get model from context or config
             model = self.context.get('model', self.llm_config.model_name)
+            print(f"\nUsing model: {model}", flush=True)
             
             if not CBORG:
                 # Map model names to OpenAI API model IDs
-
                 model_mapping = {   
                     'anthropic/claude-sonnet': 'o3-mini',  # Map to GPT-4 as closest equivalent
                     'anthropic/claude-opus': 'o3-mini',
@@ -246,40 +247,52 @@ class LLMServiceMixin(ABC):
                     'lbl/cborg-chat:latest': 'gpt-4o',  # Keep as is for CBORG
                     'lbl/cborg-coder:latest': 'gpt-4o',
                     'lbl/cborg-deepthought:latest': 'gpt-4o'
-                }   
+                }
+                model = model_mapping.get(model, 'gpt-4')
+                print(f"Mapped to OpenAI model: {model}", flush=True)
+            
+            print("\nMaking API call...", flush=True)
+            try:
+                print("API parameters:", flush=True)
+                print(f"- Model: {model}", flush=True)
+                print(f"- Temperature: {self.llm_config.temperature}", flush=True)
+                print(f"- Messages: {len(formatted_messages)}", flush=True)
                 
-                # Map the model name to its API ID, defaulting to gpt-4 if not found
-                model_id = model_mapping.get(model, 'gpt-4')
-                print(f"Using model: {model_id} (mapped from {model})")
-            else:
-                model_id = model
-            
-            # Call the API using the mapped model ID
-            if model_id[0] != 'o':
                 response = self._client.chat.completions.create(
-                    model=model_id,
+                    model=model,
                     messages=formatted_messages,
-                    temperature=self.llm_config.temperature,
-                    max_tokens=8192  # Same as ChatDash
+                    temperature=self.llm_config.temperature
                 )
-            else:
-                response = self._client.chat.completions.create(
-                    model=model_id,
-                    messages=formatted_messages,
-                    max_completion_tokens=8192  # Same as ChatDash
-                )
-            
-            result = response.choices[0].message.content
-            if not result or not result.strip():
-                raise ValueError("LLM returned empty response")
+                print("\nAPI call successful", flush=True)
                 
-            print(f"Got response, length: {len(result)}")
-            return result.strip()
-            
+                print("\nAPI Response:", flush=True)
+                print("---", flush=True)
+                print(repr(response), flush=True)
+                print("---", flush=True)
+                
+                # Extract response content
+                response_content = response.choices[0].message.content.strip()
+                print("\nExtracted content:", flush=True)
+                print("---", flush=True)
+                print(repr(response_content), flush=True)
+                print("---", flush=True)
+                
+                if not response_content:
+                    raise ValueError("LLM returned empty response")
+                
+                return response_content
+                
+            except Exception as e:
+                print(f"\nAPI call error: {str(e)}", flush=True)
+                print(f"Error type: {type(e)}", flush=True)
+                print(f"Traceback:\n{traceback.format_exc()}", flush=True)
+                raise
+                
         except Exception as e:
-            print(f"LLM API call failed: {str(e)}")
-            print(f"Error traceback: {traceback.format_exc()}")
-            raise Exception(f"LLM API call failed: {str(e)}")
+            print(f"\nTop-level error in _call_llm: {str(e)}", flush=True)
+            print(f"Error type: {type(e)}", flush=True)
+            print(f"Traceback:\n{traceback.format_exc()}", flush=True)
+            raise
     
     def count_tokens(self, text: str) -> int:
         """Estimate the number of tokens in the text.

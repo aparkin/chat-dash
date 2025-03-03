@@ -20,6 +20,8 @@ from .visualization_service import VisualizationService
 from .database_service import DatabaseService
 from .dataset_service import DatasetService
 from .chat_llm_service import ChatLLMService
+from .nmdc_service import NMDCService
+from .monet.service import MONetService
 
 # Create global service registry
 registry = ServiceRegistry()
@@ -30,6 +32,8 @@ visualization_service = VisualizationService()
 database_service = DatabaseService()
 dataset_service = DatasetService()
 literature_service = LiteratureService()
+nmdc_service = NMDCService()
+monet_service = MONetService()
 
 # Register basic services
 registry.register(store_report_service)
@@ -38,6 +42,8 @@ registry.register(database_service)
 registry.register(dataset_service)
 registry.register(literature_service)
 registry.register(ChatLLMService())
+registry.register(nmdc_service)
+registry.register(monet_service)
 
 def initialize_index_search(text_searcher: Any, text_searcher_db: Any) -> None:
     """Initialize the index search service with available searchers.
@@ -69,4 +75,6 @@ __all__ = [
     'ServiceRegistry',
     'registry',
     'initialize_index_search'
-] 
+]
+
+__version__ = '0.1.0' 

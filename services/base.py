@@ -20,12 +20,18 @@ class MessageType(Enum):
     - ERROR: Error messages and warnings
     - INFO: General informational messages
     - DEBUG: Debug information (only shown in development)
+    - WARNING: Warning messages
+    - PREVIEW: Preview of query results or data with ID for reference
+    - SUGGESTION: Suggested queries or actions
     """
     RESULT = auto()
     SUMMARY = auto()
     ERROR = auto()
     INFO = auto()
     DEBUG = auto()
+    WARNING = auto()
+    PREVIEW = auto()
+    SUGGESTION = auto()
     
     def __str__(self) -> str:
         """Return lowercase string representation for compatibility."""
@@ -80,34 +86,47 @@ class PreviewIdentifier:
             return f"{prefix}_{timestamp}_orig"
             
         # Handle alternative versions
-        parts = previous_id.split('_')
-        if len(parts) < 3:
+        # Find the registered prefix in the previous_id
+        found_prefix = None
+        for registered_prefix in cls._registered_prefixes:
+            if previous_id.startswith(registered_prefix + '_'):
+                found_prefix = registered_prefix
+                break
+                
+        if not found_prefix:
+            raise ValueError(f"No registered prefix found in previous ID: {previous_id}")
+            
+        # Remove prefix and split remaining parts
+        remaining = previous_id[len(found_prefix) + 1:]  # +1 for the underscore
+        parts = remaining.split('_')
+        
+        if len(parts) < 3:  # We need at least timestamp, time, and suffix
             raise ValueError(f"Invalid previous ID format: {previous_id}")
             
-        prefix = parts[0]
-        if prefix not in cls._registered_prefixes:
-            raise ValueError(f"Invalid prefix in previous ID: {prefix}")
-            
-        # Preserve timestamp from previous ID
-        timestamp = parts[1]
+        # Extract timestamp and time
+        timestamp = parts[0]
+        time = parts[1]
+        suffix = parts[-1]
+        
+        # Validate timestamp and time
         if not timestamp.isdigit() or len(timestamp) != 8:
             timestamp = datetime.now().strftime('%Y%m%d')  # Fallback if timestamp invalid
-            
-        time = parts[2]
         if not time.isdigit() or len(time) != 6:
             time = datetime.now().strftime('%H%M%S')  # Fallback if time invalid
             
-        suffix = parts[-1]
+        # Generate new suffix
         if suffix == 'orig':
-            return f"{prefix}_{timestamp}_{time}_alt1"
+            new_suffix = 'alt1'
         elif suffix.startswith('alt'):
             try:
                 n = int(suffix[3:])  # Extract number after 'alt'
-                return f"{prefix}_{timestamp}_{time}_alt{n+1}"
+                new_suffix = f'alt{n+1}'
             except ValueError:
                 raise ValueError(f"Invalid alternative suffix in ID: {suffix}")
         else:
             raise ValueError(f"Invalid suffix in previous ID: {suffix}")
+            
+        return f"{found_prefix}_{timestamp}_{time}_{new_suffix}"
     
     @classmethod
     def get_prefix(cls, id_str: str) -> Optional[str]:
@@ -154,7 +173,7 @@ class ServiceMessage:
     service: str
     content: str
     message_type: MessageType = MessageType.INFO
-    role: str = 'system'
+    role: str = 'assistant'
     
     def __post_init__(self):
         """Validate message content after initialization."""
@@ -198,6 +217,46 @@ class ChatService(ABC):
     
     def __init__(self, name: str):
         self.name = name
+    
+    @staticmethod
+    def _get_creation_timestamp() -> str:
+        """Get standardized creation timestamp for dataset metadata.
+        
+        Returns:
+            str: Timestamp in format YYYY-MM-DD HH:MM:SS
+        """
+        return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    @staticmethod
+    def _validate_dataset_metadata(metadata: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """Validate required fields in dataset metadata.
+        
+        Required fields:
+        - source: str
+        - creation_time: str (YYYY-MM-DD HH:MM:SS)
+        - rows: int
+        - columns: List[str]
+        
+        Args:
+            metadata: Dataset metadata dictionary
+            
+        Returns:
+            Tuple[bool, Optional[str]]: (is_valid, error_message)
+        """
+        required_fields = {
+            'source': str,
+            'creation_time': str,
+            'rows': int,
+            'columns': list
+        }
+        
+        for field, expected_type in required_fields.items():
+            if field not in metadata:
+                return False, f"Missing required metadata field: {field}"
+            if not isinstance(metadata[field], expected_type):
+                return False, f"Invalid type for metadata field {field}: expected {expected_type.__name__}"
+        
+        return True, None
     
     @abstractmethod
     def can_handle(self, message: str) -> bool:
