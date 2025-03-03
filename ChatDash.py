@@ -2349,53 +2349,7 @@ def show_help(n_clicks, chat_history):
     Input('viz-state-store', 'data')
 )
 def update_visualization(viz_state):
-    """Update visualization based on stored visualization state.
-    
-    This callback manages visualization updates by:
-    1. State Management:
-       - Retrieves current visualization state
-       - Validates state completeness
-       - Handles missing or invalid states
-       
-    2. Figure Processing:
-       - Applies stored view settings
-       - Updates layout properties
-       - Manages figure dimensions
-       - Handles annotations and shapes
-       
-    3. View Persistence:
-       - Maintains zoom levels
-       - Preserves pan positions
-       - Retains axis ranges
-       - Keeps user-added shapes
-       
-    4. Error Handling:
-       - Validates figure data
-       - Handles missing components
-       - Provides fallback options
-       - Reports debug information
-       
-    Args:
-        viz_state (dict): Current visualization state containing:
-            - figure: Plotly figure data
-            - type: Visualization type
-            - params: Additional parameters
-            - view_settings: User view preferences
-            
-    Returns:
-        tuple: Contains:
-            - figure (dict): Updated Plotly figure
-            - debug_info (str): Debug information for development
-            
-    Raises:
-        PreventUpdate: If no valid state is provided
-        
-    Note:
-        - Maintains interactive features
-        - Preserves user customizations
-        - Handles multiple chart types
-        - Optimizes for performance
-    """
+    """Update visualization when state changes."""
     if not viz_state:
         return {'data': [], 'layout': {'title': 'No visualization selected'}}, "No visualization state"
     
@@ -2405,7 +2359,35 @@ def update_visualization(viz_state):
     if 'figure' not in viz_state:
         return {'data': [], 'layout': {'title': 'No figure in visualization state'}}, "No figure in state"
     
-    return viz_state['figure'], f"Updated figure from state: {list(viz_state.keys())}"
+    # Create a deep copy of the figure to avoid modifying the original
+    figure = {
+        'data': viz_state['figure'].get('data', []),
+        'layout': viz_state['figure'].get('layout', {}).copy()
+    }
+    
+    # Apply view settings if they exist
+    if 'view_settings' in viz_state:
+        view_settings = viz_state['view_settings']
+        for key, value in view_settings.items():
+            # Handle nested properties like 'xaxis.range'
+            if '.' in key:
+                parts = key.split('.')
+                current = figure['layout']
+                for part in parts[:-1]:
+                    if part not in current:
+                        current[part] = {}
+                    current = current[part]
+                current[parts[-1]] = value
+            else:
+                figure['layout'][key] = value
+    
+    debug_info = {
+        'has_view_settings': 'view_settings' in viz_state,
+        'view_settings': list(viz_state.get('view_settings', {}).keys()),
+        'layout_keys': list(figure['layout'].keys())
+    }
+    
+    return figure, f"Updated figure with view settings: {json.dumps(debug_info, indent=2)}"
 
 # Add callback to handle figure state updates
 @callback(
@@ -2416,71 +2398,40 @@ def update_visualization(viz_state):
     prevent_initial_call=True
 )
 def update_figure_state(relayout_data, figure_data, viz_state):
-    """Store and manage figure view state during user interactions.
-    
-    This callback captures and persists visualization state changes:
-    1. View Settings:
-       - Zoom levels and ranges
-       - Pan positions
-       - Axis domains
-       - Layout properties
-       
-    2. Figure Elements:
-       - Annotations
-       - Shapes
-       - Traces visibility
-       - Legend state
-       
-    3. User Customizations:
-       - Added shapes or annotations
-       - Modified axis properties
-       - Custom color schemes
-       - Layout adjustments
-       
-    4. State Management:
-       - Initializes missing state
-       - Updates changed properties
-       - Preserves unchanged settings
-       - Validates state integrity
-       
-    Args:
-        relayout_data (dict): User interaction data from Plotly
-        figure_data (dict): Current figure state and data
-        viz_state (dict): Existing visualization state
+    """Store figure view state when user interacts with the plot."""
+    if not viz_state:
+        raise PreventUpdate
         
-    Returns:
-        dict: Updated visualization state containing:
-            - view_settings: User view preferences
-            - figure_properties: Current figure state
-            - custom_elements: User-added elements
-            
-    Raises:
-        PreventUpdate: If no state changes are needed
-        
-    Note:
-        - Handles partial updates efficiently
-        - Preserves user customizations
-        - Maintains state consistency
-        - Optimizes for performance
-    """
-    if not relayout_data and not figure_data:
-        return viz_state
+    # Initialize view settings if not present
+    if not viz_state.get('view_settings'):
+        viz_state['view_settings'] = {}
     
-    # Update view settings
+    # Update from relayoutData
     if relayout_data:
+        # Store all view-related settings
         for key, value in relayout_data.items():
-            if key in ['zoom', 'pan', 'xaxis.range', 'yaxis.range', 'shapes']:
+            # Comprehensive list of view-related properties
+            if any(k in key for k in [
+                'zoom', 'center', 'range', 'domain', 'autorange',
+                'scale', 'scaleanchor', 'scaleratio', 'constrain',
+                'constraintoward', 'matches', 'showspikes', 'spikethickness',
+                'projection', 'camera', 'aspectratio', 'aspectmode'
+            ]):
                 viz_state['view_settings'][key] = value
     
-    # Update figure properties
+    # Update from figure data if it contains new layout information
     if figure_data and 'layout' in figure_data:
-        for key, value in figure_data['layout'].items():
-            if key in ['title', 'xaxis.title', 'yaxis.title', 'legend.title']:
-                viz_state['figure_properties'][key] = value
-    
-    # Update custom elements
-    if 'shapes' in figure_data['layout']:
-        viz_state['custom_elements'] = figure_data['layout']['shapes']
+        layout = figure_data['layout']
+        # Store layout properties that affect the view
+        for key, value in layout.items():
+            if any(k in key for k in ['axis', 'margin', 'scene', 'geo', 'mapbox']):
+                viz_state['view_settings'][key] = value
+        
+        # Store shapes and annotations
+        if 'shapes' in layout:
+            viz_state['view_settings']['shapes'] = layout['shapes']
+        if 'annotations' in layout:
+            viz_state['view_settings']['annotations'] = layout['annotations']
     
     return viz_state
 

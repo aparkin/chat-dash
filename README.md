@@ -73,6 +73,58 @@ http://0.0.0.0:8051
 - Use natural language to ask questions about your data
 - Reference specific columns using `backticks` when needed
 
+##### MONet Soil Database
+- Query the MONet soil database using:
+  - Natural language: `monet: [your question]`
+  - Direct JSON queries:
+    ```monet
+    {
+      "filters": [{
+        "column_name": [
+          {"operation": "range", "value": [min, max]},
+          {"operation": ">=", "value": number}
+        ]
+      }],
+      "geo_point": {
+        "latitude": float,
+        "longitude": float,
+        "radius_km": float
+      }
+    }
+    ```
+  - Execute queries: `monet.search [query_id]`
+  - Convert to dataset: `convert [query_id] to dataset`
+  - Service info: `tell me about monet`
+- Filter operations:
+  - Numeric: >, <, >=, <=, ==, range
+  - Text: contains, exact, starts_with
+  - Date: range, >, <, ==
+- Geographic constraints:
+  - Point with radius search
+  - Bounding box search
+
+##### NMDC Microbiome Data
+- Access NMDC API data through:
+  - Natural language: `nmdc: [your question]`
+  - Direct JSON queries:
+    ```nmdc
+    {
+      "endpoint": "/biosamples",
+      "filter": "env_broad_scale=ocean and latitude>45"
+    }
+    ```
+  - Execute queries: `nmdc.search [query_id]`
+  - Convert to dataset: `convert [query_id] to dataset`
+  - Service info: `tell me about nmdc`
+- Common endpoints:
+  - /biosamples - Search biological samples and metadata
+  - /studies - Search research studies and protocols
+  - /data_objects - Search associated data files
+- Features:
+  - Standardized metadata representation
+  - Cross-study data integration
+  - Biological data accessibility
+
 ##### Literature Search
 - Search scientific literature using natural language:
   - "What is known about gene regulation?"

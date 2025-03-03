@@ -801,8 +801,8 @@ class DatasetService(ChatService, LLMServiceMixin):
                 metadata = data['metadata']
                 parts.extend([
                     f"\n**{name}**",
-                    f"- Source: {metadata['source']}",
-                    f"- Upload time: {metadata['upload_time']}",
+                    f"- Source: {metadata.get('source', 'Unknown')}",
+                    f"- Creation time: {metadata.get('creation_time', metadata.get('upload_time', 'Unknown'))}",
                     f"- Rows: {len(df)}",
                     f"- Columns: {len(df.columns)}"
                 ])
@@ -838,8 +838,8 @@ class DatasetService(ChatService, LLMServiceMixin):
             parts = [
                 f"### Analysis of Dataset: {target}",
                 "\n**Basic Information**",
-                f"- Source: {metadata['source']}",
-                f"- Upload time: {metadata['upload_time']}",
+                f"- Source: {metadata.get('source', 'Unknown')}",
+                f"- Creation time: {metadata.get('creation_time', metadata.get('upload_time', 'Unknown'))}",
                 f"- Rows: {len(df)}",
                 f"- Columns: {len(df.columns)}",
                 "\n**Column Information**"
@@ -2030,7 +2030,9 @@ CORE CONSTRAINTS (ABSOLUTELY REQUIRED):
    - MUST implement ALL logic inside the analyze_data function
    - MUST access data using the datasets dictionary and selected dataset:
       CORRECT:   df = pd.DataFrame(datasets['{selected_dataset}']['df'])
-      INCORRECT: df = ... or using df directly  
+   - DO NOT add any imports - all necessary imports are already provided in the template
+   - DO NOT modify any existing imports in the template
+   - DO NOT move imports inside the function
 
 2. Results Structure:
    - MUST return a dictionary named 'result' containing ONLY DataFrames (or empty if only a visualization is produced)

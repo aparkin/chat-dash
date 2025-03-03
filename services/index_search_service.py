@@ -331,7 +331,8 @@ class IndexSearchService(ChatService, LLMServiceMixin):
                     'source': f"Search Query: {search_id}",
                     'query': stored['query'],
                     'threshold': stored['threshold'],
-                    'execution_time': stored['metadata']['execution_time'],
+                    'creation_time': self._get_creation_timestamp(),
+                    'execution_time': stored['metadata']['execution_time'],  # Keep for backwards compatibility
                     'rows': len(df),
                     'columns': list(df.columns),
                     'sources': stored['metadata']['sources']

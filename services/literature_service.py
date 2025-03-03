@@ -798,7 +798,8 @@ Current threshold: {threshold}
                 'source': f"Literature Query: {query_id}",
                 'query': stored_query['query'],
                 'threshold': stored_query['threshold'],
-                'execution_time': stored_query['metadata']['execution_time'],
+                'creation_time': self._get_creation_timestamp(),
+                'execution_time': stored_query['metadata']['execution_time'],  # Keep for backwards compatibility
                 'rows': len(df),
                 'columns': list(df.columns),
                 'query_info': stored_query['metadata']['query_info']

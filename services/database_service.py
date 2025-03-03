@@ -18,6 +18,7 @@ from pathlib import Path
 import traceback
 import json
 from enum import Enum, auto
+import numpy as np
 
 from .base import (
     ChatService, 
@@ -990,6 +991,51 @@ To convert your result to a dataset you can use 'convert {query_id} to dataset'"
             db_path = context['database_state']['path']
             results, metadata, _ = self._execute_sql_query(stored['sql'], db_path)
             
+            # Process DataFrame for consistency with uploaded datasets
+            try:
+                # Define common missing value indicators
+                missing_values = [
+                    '-', 'NA', 'na', 'N/A', 'n/a',
+                    'NaN', 'nan', 'NAN',
+                    'None', 'none', 'NONE',
+                    'NULL', 'null', 'Null',
+                    'ND', 'nd', 'N/D', 'n/d',
+                    '', ' '  # Empty strings and spaces
+                ]
+                
+                # Track transformations for metadata
+                transformations = []
+                
+                # Replace missing values
+                results = results.replace(missing_values, np.nan)
+                if results.isna().any().any():
+                    transformations.append("Standardized missing values")
+                
+                # Attempt numeric conversion for string columns
+                numeric_conversions = []
+                for col in results.select_dtypes(include=['object']).columns:
+                    try:
+                        # Check if column contains only numeric values (allowing NaN)
+                        non_nan = results[col].dropna()
+                        if len(non_nan) > 0 and non_nan.astype(str).str.match(r'^-?\d*\.?\d+$').all():
+                            results[col] = pd.to_numeric(results[col], errors='coerce')
+                            numeric_conversions.append(col)
+                    except Exception:
+                        continue
+                
+                if numeric_conversions:
+                    transformations.append(f"Converted columns to numeric: {', '.join(numeric_conversions)}")
+                
+                # Clean column names
+                old_columns = list(results.columns)
+                results.columns = results.columns.str.replace(r'[.\[\]{}]', '_', regex=True)
+                if any(old != new for old, new in zip(old_columns, results.columns)):
+                    transformations.append("Cleaned column names")
+                
+            except Exception as e:
+                print(f"Warning: Error during DataFrame processing: {str(e)}")
+                transformations.append(f"Note: Some data cleaning failed: {str(e)}")
+            
             # Get datasets store
             datasets = context.get('datasets_store', {})
             
@@ -1021,10 +1067,14 @@ To convert your result to a dataset you can use 'convert {query_id} to dataset'"
                     'creation_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'rows': len(results),
                     'columns': list(results.columns),
-                    'referenced_tables': metadata.get('referenced_tables', [])
+                    'referenced_tables': metadata.get('referenced_tables', []),
+                    'transformations': transformations  # Add transformation history
                 },
                 'profile_report': profile_html
             }
+            
+            # Format transformation message
+            transform_msg = "\n- " + "\n- ".join(transformations) if transformations else ""
             
             return ServiceResponse(
                 messages=[ServiceMessage(
@@ -1034,7 +1084,8 @@ To convert your result to a dataset you can use 'convert {query_id} to dataset'"
 - Rows: {len(results)}
 - Columns: {', '.join(results.columns)}
 - Source: SQL Query {query_id}
-- Referenced tables: {', '.join(metadata.get('referenced_tables', []))}""",
+- Referenced tables: {', '.join(metadata.get('referenced_tables', []))}
+Data Transformations:{transform_msg}""",
                     message_type=MessageType.INFO
                 )],
                 store_updates={
