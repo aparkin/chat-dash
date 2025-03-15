@@ -91,3 +91,7 @@ cache/
 
 # Test scripts and runners
 run_*_service.py
+
+# Specific cache files
+*parameter_cache.json
+services/usgs/parameter_cache.json
