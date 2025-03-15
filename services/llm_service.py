@@ -192,7 +192,7 @@ class LLMServiceMixin(ABC):
                 })
                 print("\nSystem prompt:", flush=True)
                 print("---", flush=True)
-                print(system_prompt.strip(), flush=True)
+                print(system_prompt.strip()[0:200], flush=True)
                 print("---", flush=True)
             
             # Process and validate each message
@@ -258,17 +258,32 @@ class LLMServiceMixin(ABC):
                 print(f"- Temperature: {self.llm_config.temperature}", flush=True)
                 print(f"- Messages: {len(formatted_messages)}", flush=True)
                 
-                response = self._client.chat.completions.create(
-                    model=model,
-                    messages=formatted_messages,
-                    temperature=self.llm_config.temperature
-                )
-                print("\nAPI call successful", flush=True)
+                # Models that don't support temperature parameter
+                no_temperature_models = ['o1', 'o1-mini']
                 
-                print("\nAPI Response:", flush=True)
-                print("---", flush=True)
-                print(repr(response), flush=True)
-                print("---", flush=True)
+                # Prepare API call parameters
+                api_params = {
+                    'model': model,
+                    'messages': formatted_messages
+                }
+                
+                # Only include temperature for models that support it
+                if model not in no_temperature_models:
+                    api_params['temperature'] = self.llm_config.temperature
+                
+                try:
+                    response = self._client.chat.completions.create(**api_params)
+                except Exception as api_error:
+                    error_msg = str(api_error)
+                    if "temperature" in error_msg.lower():
+                        print(f"Temperature parameter error detected. Retrying without temperature.", flush=True)
+                        # Remove temperature and retry
+                        if 'temperature' in api_params:
+                            del api_params['temperature']
+                        response = self._client.chat.completions.create(**api_params)
+                    else:
+                        # Re-raise if it's not a temperature-related error
+                        raise
                 
                 # Extract response content
                 response_content = response.choices[0].message.content.strip()

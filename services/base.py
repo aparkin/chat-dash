@@ -264,13 +264,13 @@ class ChatService(ABC):
         pass
     
     @abstractmethod
-    def parse_request(self, message: str) -> Dict[str, Any]:
+    async def parse_request(self, message: str) -> Dict[str, Any]:
         """Extract parameters and requirements from message."""
         pass
     
     @abstractmethod
-    def execute(self, params: Dict[str, Any], context: Dict[str, Any]) -> ServiceResponse:
-        """Execute the service request."""
+    async def execute(self, request: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the parsed request."""
         pass
         
     def detect_content_blocks(self, text: str) -> List[Tuple[str, int, int]]:
@@ -292,6 +292,19 @@ class ChatService(ABC):
             Text with IDs added to relevant blocks
         """
         return text
+
+    def get_status(self) -> Optional[Dict[str, Any]]:
+        """Get service status information.
+        
+        This is an optional method that services can implement to report their status.
+        The default implementation returns None, indicating the service is ready.
+        
+        Services that need time to initialize (like MONet) can override this.
+        
+        Returns:
+            Optional[Dict[str, Any]]: Status information or None if default status is acceptable
+        """
+        return None
 
     @abstractmethod
     def get_help_text(self) -> str:

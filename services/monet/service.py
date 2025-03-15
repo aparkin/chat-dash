@@ -665,7 +665,7 @@ Remember to format the corrected query as valid JSON inside a ```monet``` code b
         
         # Always show these primary columns if they exist
         primary_cols = [
-            'sample_id', 'sample_name', 'lat_lon_latitude', 'lat_lon_longitude', 
+            'id', 'title', 'latitude', 'longitude', 'id_sample','core_section',
             'collection_date'
         ]
         preview_cols = [col for col in primary_cols if col in df.columns]
@@ -731,9 +731,9 @@ Remember to format the corrected query as valid JSON inside a ```monet``` code b
             return "\n".join(stats)
         
         # Geographic distribution
-        if 'lat_lon_latitude' in df.columns and 'lat_lon_longitude' in df.columns:
-            lat_stats = df['lat_lon_latitude'].describe()
-            lon_stats = df['lat_lon_longitude'].describe()
+        if 'latitude' in df.columns and 'longitude' in df.columns:
+            lat_stats = df['latitude'].describe()
+            lon_stats = df['longitude'].describe()
             stats.append("\nGeographic Coverage:")
             stats.append(f"- Latitude: {lat_stats['min']:.2f} to {lat_stats['max']:.2f}°")
             stats.append(f"- Longitude: {lon_stats['min']:.2f} to {lon_stats['max']:.2f}°")
@@ -857,46 +857,30 @@ Remember to format the corrected query as valid JSON inside a ```monet``` code b
         return None
 
     def get_help_text(self) -> str:
-        """Get help text for MONet service commands."""
+        """Get help text for MONet service."""
         return """
-🌱 **MONet Soil Database**
-
-Commands:
-1. Direct Query:
-   ```monet
-   {
-     "filters": [
-       {
-         "column_name": [
-           {"operation": "range", "value": [min, max]},
-           {"operation": ">=", "value": number}
-         ]
-       }
-     ],
-     "geo_point": {
-       "latitude": float,
-       "longitude": float,
-       "radius_km": float
-     },
-     "geo_bbox": {
-       "min_lat": float,
-       "max_lat": float,
-       "min_lon": float,
-       "max_lon": float
-     }
-   }
-   ```
-
-2. Natural Language: `monet: [your question]`
-3. Execute Query: `monet.search [query_id]`
-4. Convert to Dataset: `convert [query_id] to dataset`
-5. Service Info: `tell me about monet`
-
-Filter Operations:
-- Numeric: >, <, >=, <=, ==, range
-- Text: contains, exact, starts_with
-- Date: range, >, <, ==
+🌍 **MONet Soil Database**
+- Search MONet database: `monet: [natural language query]`
+- Create a direct query: 
+  ```monet
+  {
+    "filters": [{"field": "pH", "op": ">", "value": 6}],
+    "geo": {"type": "point_radius", "coordinates": [35.9, -79.05], "radius_km": 100}
+  }
+  ```
+- Execute a query: `monet.search monet_query_id`
+- Convert query to dataset: `convert monet_query_id to dataset`
 """
+
+    def get_status(self) -> Optional[Dict[str, Any]]:
+        """Get current service status information."""
+        # Only report status if data isn't loaded yet
+        if not hasattr(self.data_manager, '_unified_df') or self.data_manager._unified_df is None:
+            return {
+                'status': 'initializing',
+                'ready': False
+            }
+        return None  # Use default status when ready
 
     def get_llm_prompt_addition(self) -> str:
         """Get LLM prompt addition for MONet capabilities."""

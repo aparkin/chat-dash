@@ -109,22 +109,22 @@ Format your response as:
 3. Current Focus: (what they're working on right now)
 """
 
-        trajectory_prompt = f"""Analyze these service results and provide a concise summary of what has been learned:
+        trajectory_prompt = f"""Analyze these service results and provide a concise summary of the research trajectory:
 
 Service Results (from most recent):
 {chr(10).join(f"[{msg['service']}] {msg['content']}" for msg in trajectory_messages)}
 
-Focus on:
-- Key findings and patterns
-- Environmental, biological, physical, and chemical insights
-- Geographic relationships if relevant
-- Any contradictions or unsuccessful approaches
-- Most recent findings should be emphasized
+IMPORTANT: DO NOT repeat any specific results, data, or analysis outputs.
+Instead, provide a high-level narrative of:
+1. The progression of the investigation
+2. Key insights and turning points
+3. Overall patterns discovered
+4. Current state of understanding
 
-Format your response as:
-1. Key Findings: (2-3 bullet points)
-2. Patterns Identified: (if any)
-3. Open Questions: (based on results)
+Format as:
+1. Investigation Path: (how the research has evolved)
+2. Key Discoveries: (what has been learned, without specifics)
+3. Current Focus: (what's being investigated now)
 """
 
         # Get summaries from LLM
@@ -238,15 +238,51 @@ Format your response as:
             "   - Only consider artistic, cultural, or general interpretations if explicitly requested",
 
             "2. Scientific Subject Area Priority:",
-            "   - Most scientific topics involve environmental science, biology, chemistry, physics, geography and geology ",
-            "   - Organismal taxonomy, physiology, metabolism, genetics, molecular biology, and biochemistry are also a high priority with a focus on omics data, gene annotations and enzyme functions key.",
-            "   - When feasible look to link these concepts together and to available data sources.",
+            "   - Primary focus on environmental science, biology, chemistry, physics, geography and geology",
+            "   - Strong emphasis on organismal taxonomy, physiology, metabolism, genetics, molecular biology, and biochemistry",
+            "   - Special attention to geography, geology, omics data, gene annotations and enzyme functions",
+            "   - Connect concepts across scientific domains when possible",
 
+            "RESPONSE FORMAT REQUIREMENTS:",
+            "1. Analysis Arc (2-3 sentences):",
+            "   - Summarize the progression of investigation in scientific terms",
+            "   - Highlight key turning points in understanding",
+            "   - Describe current analytical focus and its scientific significance",
+            "   DO NOT repeat any specific results or analyses",
+            
+            "2. Knowledge Context (2-3 bullet points):",
+            "   - Place findings in broader scientific context",
+            "   - Connect to fundamental environmental, biological/chemical/physical principles",
+            "   - Highlight relationships between different scientific domains",
+            "   - Emphasize mechanistic understanding where relevant",
+            "   Focus on general scientific knowledge, NOT specific findings",
+            
+            "3. Strategic Next Steps (2-3 suggestions):",
+            "   - Recommend specific analyses using available services",
+            "   - Ground suggestions in scientific principles",
+            "   - Explain how each step advances scientific understanding",
+            "   - Connect to available data sources and analytical capabilities",
+            "   Format each suggestion with clear scientific rationale and expected insights",
+
+            "CRITICAL CONSTRAINTS:",
+            "1. ABSOLUTELY NO REPETITION OF:",
+            "   - Raw data or results from previous analyses",
+            "   - Specific numerical findings",
+            "   - Previous service outputs",
+            "   - Detailed analysis content",
+            "   Instead, describe the scientific significance and implications",
+            
+            "2. MAINTAIN FOCUS ON:",
+            "   - Scientific progress of investigation",
+            "   - Mechanistic patterns and relationships discovered",
+            "   - Theoretical context and implications",
+            "   - Strategic direction for deeper scientific understanding",
+            
             "3. Subject Matter Priority:",
-            "   - Primary: Data analysis, scientific methods, research tools relevant to the chat context",
-            "   - Secondary: Scientific and technical suggestions for the user to explore given that they are relevant to the chat context",
-            "   - Tertiary: General knowledge that supports scientific understanding",
-            "   - Avoid: Non-technical interpretations unless specifically requested or can be fairly linked to the chat context",
+            "   - Primary: Scientific data analysis and research methods",
+            "   - Secondary: Technical suggestions grounded in scientific principles",
+            "   - Tertiary: General scientific knowledge that supports understanding",
+            "   - Avoid: Non-technical interpretations unless specifically requested",
             
             "AVAILABLE DATA SOURCES:",
             "Datasets:" if dataset_section else "Datasets: None loaded",
@@ -261,7 +297,6 @@ Format your response as:
             f"Current Goals and Interests:\n{intent_summary}",
             f"Analysis Progress and Findings:\n{trajectory_summary}",
             
-            "CRITICAL CONSTRAINTS:",
             "1. ABSOLUTELY NO CODE GENERATION:",
             "   - DO NOT generate any Python code snippets",
             "   - DO NOT suggest modifications to existing code",

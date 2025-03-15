@@ -74,3 +74,20 @@ testing/
 *_temp.py
 temp_*.py
 schema_manager.py
+
+# Coverage files
+.coverage
+.coverage.*
+
+# Cache directories
+cache/
+**/cache/*.json
+**/cache/*.sqlite
+
+# Review and punchlist docs (optional - uncomment if you don't want these in git)
+# *_review.md
+# *_punchlist.md
+# cleanup_*.md
+
+# Test scripts and runners
+run_*_service.py

@@ -96,7 +96,7 @@ License: MIT
 """
 
 import dash
-from dash import html, dcc, Input, Output, State, callback, ALL, dash_table, no_update
+from dash import dcc, html, Input, Output, State, callback, dash_table, ctx, ALL, MATCH
 import dash_bootstrap_components as dbc
 import openai
 import os
@@ -297,6 +297,32 @@ All visualizations feature:
             return f"{base_message}\n\n🔧 **Available Commands**\n{service_help}"
     
     return base_message
+
+def get_services_status() -> Dict[str, Dict[str, Any]]:
+    """Get status for all registered services."""
+    from services import service_registry
+    
+    services_status = {}
+    for name, service in service_registry._services.items():
+        # Default status assumes ready
+        status_info = {
+            'status': 'ready',
+            'ready': True,
+            'description': f"{name} service"
+        }
+        
+        # Check for optional get_status method
+        if hasattr(service, 'get_status') and callable(service.get_status):
+            try:
+                custom_status = service.get_status()
+                if custom_status and isinstance(custom_status, dict):
+                    status_info.update(custom_status)
+            except Exception:
+                pass  # Ignore errors, keep default status
+        
+        services_status[name] = status_info
+    
+    return services_status
 
 ####################################
 #
@@ -968,6 +994,8 @@ app.layout = html.Div([
     # Add Weaviate state store
     dcc.Store(id='weaviate-state', data=None),
     dcc.Store(id='_weaviate-init', data=True),  # Hidden trigger for initial connection
+    # Add services status store
+    dcc.Store(id='services-status-store', data={}),
     # Add interval for periodic status checks
     dcc.Interval(id='database-status-interval', interval=30000),  # 30 seconds
     dbc.Container([
@@ -1104,12 +1132,45 @@ app.layout = html.Div([
                     id="dataset-tabs",
                     active_tab="tab-preview"
                     ),
-                    html.Div(id="dataset-tab-content", className="p-3")
+                    html.Div(id="dataset-tab-content", className="p-3"),
+                    # Add Services Status Indicator at the bottom of the tabbed pane
+                    html.Div([
+                        html.Span("Services: ", style={'fontSize': '12px', 'marginRight': '8px', 'fontWeight': 'bold'}),
+                        html.Div(id='services-status-container', style={
+                            'display': 'flex',
+                            'flexWrap': 'wrap',
+                            'gap': '6px',
+                            'alignItems': 'center',
+                            'flex': '1'
+                        }),
+                        html.Button(
+                            '🔄', 
+                            id='refresh-services-status',
+                            n_clicks=0,
+                            title='Refresh service status',
+                            style={
+                                'marginLeft': '8px',
+                                'fontSize': '12px',
+                                'border': 'none',
+                                'background': 'none',
+                                'cursor': 'pointer'
+                            }
+                        )
+                    ], style={
+                        'display': 'flex',
+                        'alignItems': 'center',
+                        'marginTop': 'auto',  # Push to the bottom of the container
+                        'padding': '8px',
+                        'borderTop': '1px solid #dee2e6',
+                        'backgroundColor': 'white'
+                    })
                 ], style={
                     'border': '1px solid #ddd',
                     'borderRadius': '5px',
                     'backgroundColor': '#f8f9fa',
-                    'minHeight': '200px'
+                    'minHeight': '200px',
+                    'display': 'flex',
+                    'flexDirection': 'column'  # Make it a column flex container so marginTop: auto works
                 })
             ], width=9)  # Changed from 8 to 9 (75% -> ~80%)
         ], className="mb-4"),
@@ -1430,7 +1491,7 @@ def handle_chat_message(n_clicks, input_value, chat_history, model, datasets, se
                         dataset_list = [create_dataset_card(name, data) for name, data in datasets.items()]
                 
                 # Update return values from service response
-                chat_input_value = response.state_updates.get('chat_input', dash.no_update)
+                chat_input_value = response.state_updates.get('chat_input', '')  # Default to clearing input
                 active_tab = response.state_updates.get('active_tab', dash.no_update)
                 viz_state = response.state_updates.get('viz_state', dash.no_update)
 
@@ -2997,6 +3058,168 @@ def update_weaviate_tooltips(state):
     coll_msg = state['collections']['message']
     
     return conn_msg, coll_msg
+
+@callback(
+    [Output('services-status-container', 'children'),
+     Output('services-status-store', 'data')],
+    [Input('refresh-services-status', 'n_clicks'),
+     Input('_weaviate-init', 'data')],
+    prevent_initial_call='initial_duplicate'
+)
+def update_services_status(n_clicks, weaviate_init):
+    """Update service status indicators."""
+    services_status = get_services_status()
+    service_indicators = []
+    
+    # Define pastel colors for different services
+    # This ensures each service has a consistent, visually distinct color
+    service_colors = {
+        'dataset': '#c6e6f5',       # Light blue
+        'database': '#e1ecc8',      # Light green
+        'visualization': '#ffd3b6',  # Light orange
+        'literature': '#d6cdea',    # Light purple
+        'store_report': '#f7d6e0',  # Light pink
+        'index_search': '#eff9da',  # Light yellow-green
+        'chat_llm': '#daeaf6',      # Light sky blue
+        'monet': '#ffefd9',         # Light peach
+        'nmdc': '#e6ffd9'           # Light mint
+    }
+    
+    # Default pastel colors for any unlisted services - these will rotate based on name
+    default_pastel_colors = [
+        '#ffccd5', '#ffe5d9', '#fff0d9', '#fcf5c7', '#e2efc7', '#d0f0c0', 
+        '#c7e9e0', '#c7e8f3', '#d1d2f9', '#e7d9f0'
+    ]
+    
+    for name in sorted(services_status.keys()):
+        status_info = services_status[name]
+        
+        # Get service color (or assign one from the defaults if not listed)
+        if name in service_colors:
+            base_color = service_colors[name]
+        else:
+            # Assign a color based on the name's hash so it's consistent between runs
+            color_idx = hash(name) % len(default_pastel_colors)
+            base_color = default_pastel_colors[color_idx]
+        
+        # Determine status color for the dot indicator
+        status_color = '#28a745'  # Green for ready
+        if not status_info.get('ready', True):
+            status_color = '#ffc107'  # Yellow for initializing
+        if status_info.get('status') == 'error': 
+            status_color = '#dc3545'  # Red for error
+            
+        # Create tooltip text with detailed info
+        tooltip_text = f"{name}: {status_info.get('status', 'ready')}"
+        if status_info.get('description'):
+            tooltip_text += f"\n{status_info['description']}"
+        tooltip_text += "\nClick for help"
+
+        # Create the indicator - now with a clickable button
+        indicator_id = f"service-indicator-{name}"
+        service_indicators.append(
+            html.Div([
+                dbc.Tooltip(
+                    tooltip_text,
+                    target=indicator_id,
+                    placement='top'
+                ),
+                html.Button([
+                    html.I(className="fas fa-circle", 
+                          style={'color': status_color, 'marginRight': '3px', 'fontSize': '8px'}),
+                    html.Span(name, style={'fontSize': '11px'})
+                ], 
+                id={'type': 'service-help-button', 'index': name},
+                style={
+                    'border': 'none', 
+                    'background': 'none',
+                    'cursor': 'pointer',
+                    'padding': '0',
+                    'textAlign': 'left',
+                    'width': '100%'
+                })
+            ], 
+            id=indicator_id,
+            style={
+                'padding': '3px 8px',
+                'borderRadius': '12px',
+                'border': '1px solid #dee2e6',
+                'backgroundColor': base_color
+            })
+        )
+    
+    return service_indicators, services_status
+
+@callback(
+    [Output('chat-history', 'children', allow_duplicate=True),
+     Output('chat-store', 'data', allow_duplicate=True)],
+    Input({'type': 'service-help-button', 'index': ALL}, 'n_clicks'),
+    [State('chat-store', 'data')],
+    prevent_initial_call=True
+)
+def show_service_help(n_clicks_list, chat_history):
+    """Display help message for the clicked service in the chat.
+    
+    This callback is triggered when a user clicks on one of the service
+    indicators, showing that service's help text in the chat interface.
+    """
+    if not any(n_clicks for n_clicks in n_clicks_list if n_clicks):
+        raise PreventUpdate
+    
+    # Get the clicked button's ID
+    triggered_id = ctx.triggered_id
+    if not triggered_id:
+        raise PreventUpdate
+    
+    service_name = triggered_id['index']
+    
+    # Get the service from the registry
+    service = service_registry.get_service(service_name)
+    if not service:
+        raise PreventUpdate
+    
+    # Get the help text from the service
+    help_text = service.get_help_text()
+    if not help_text:
+        help_text = f"No help available for the {service_name} service."
+    
+    # Create a chat message with the help text
+    help_message = {
+        'role': 'assistant',
+        'content': f"### {service_name.capitalize()} Service Help\n\n{help_text}",
+        'service': service_name,
+        'type': 'info',
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    # Add the message to chat history
+    chat_history = chat_history.copy() if chat_history else []
+    chat_history.append(help_message)
+    
+    # Return updated chat history
+    return create_chat_elements_batch(chat_history), chat_history
+
+# Add this after the callback imports
+app.clientside_callback(
+    """
+    function(children) {
+        if (!children) return;
+        
+        // Use setTimeout to ensure this runs after the DOM is updated
+        setTimeout(function() {
+            var chatContainer = document.getElementById('chat-history');
+            if (chatContainer) {
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }
+        }, 100);
+        
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('chat-history', 'children', allow_duplicate=True),
+    Input('chat-history', 'children'),
+    prevent_initial_call=True
+)
 
 if __name__ == '__main__':
     # Start the app

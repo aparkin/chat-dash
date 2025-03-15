@@ -192,7 +192,33 @@ class BubblePlot(VisualizationType):
                 if params['size'] in df.columns:
                     # Column-based size
                     size_values = df[params['size']]
-                    marker_size = 10 + 40 * (size_values - size_values.min()) / (size_values.max() - size_values.min())
+                    
+                    # Convert to numeric, coercing non-numeric values to NaN
+                    numeric_size_values = pd.to_numeric(size_values, errors='coerce')
+                    
+                    # Check if we have any valid numeric values
+                    if not numeric_size_values.notna().any():
+                        print(f"Warning: Size column '{params['size']}' has no valid numeric values. Using default size.")
+                        marker_size = 20  # Default size
+                    else:
+                        # Replace NaN values with the median of valid values or a default
+                        median_size = numeric_size_values.median()
+                        if pd.isna(median_size):  # If all values are NaN
+                            numeric_size_values = numeric_size_values.fillna(20)  # Default size
+                        else:
+                            numeric_size_values = numeric_size_values.fillna(median_size)
+                        
+                        # Scale sizes for better visualization
+                        size_min, size_max = 10, 50  # Reasonable size range
+                        size_range = numeric_size_values.max() - numeric_size_values.min()
+                        
+                        if size_range > 0:
+                            marker_size = size_min + (size_max - size_min) * (
+                                (numeric_size_values - numeric_size_values.min()) / size_range
+                            )
+                        else:
+                            # If all values are the same, use a fixed size
+                            marker_size = (size_min + size_max) / 2
                 else:
                     # Static size - try to convert to number
                     try:
@@ -210,10 +236,31 @@ class BubblePlot(VisualizationType):
             if params.get('color'):
                 if params['color'] in df.columns:
                     color_values = df[params['color']]
-                    if pd.api.types.is_numeric_dtype(color_values):
+                    
+                    # Check if the column can be treated as numeric
+                    numeric_color_values = pd.to_numeric(color_values, errors='coerce')
+                    has_numeric_values = numeric_color_values.notna().any()
+                    
+                    if has_numeric_values and pd.api.types.is_numeric_dtype(color_values):
+                        # Numeric color scale
                         color_discrete = False
+                        
+                        # Replace NaN values with a default or median
+                        if numeric_color_values.isna().any():
+                            median_color = numeric_color_values.median()
+                            if pd.isna(median_color):
+                                numeric_color_values = numeric_color_values.fillna(0)
+                            else:
+                                numeric_color_values = numeric_color_values.fillna(median_color)
+                            
+                            # Update color_values with the cleaned numeric values
+                            color_values = numeric_color_values
                     else:
+                        # Categorical colors
                         color_discrete = True
+                        
+                        # Handle NaN values by converting them to a string representation
+                        color_values = color_values.fillna('N/A')
                         unique_values = color_values.nunique()
                         color_sequence = self.generate_colors(unique_values)
                 else:
@@ -424,19 +471,38 @@ class HeatmapPlot(VisualizationType):
             numeric_cols = df.select_dtypes(include=[np.number]).columns
             data = df[numeric_cols].copy()
         else:
+            # Convert columns to numeric if possible
             data = df[params['columns']].copy()
+            
+            # Try to convert non-numeric columns to numeric
+            for col in data.columns:
+                if not pd.api.types.is_numeric_dtype(data[col]):
+                    numeric_col = pd.to_numeric(data[col], errors='coerce')
+                    if numeric_col.notna().any():  # If at least some values could be converted
+                        data[col] = numeric_col
+                        print(f"Warning: Column '{col}' was converted to numeric with some NaN values")
             
         # Store original index values if they exist
         original_index = df.index
         
         # Handle missing values more robustly
         if data.isna().any().any():
+            # Count NaNs before filling
+            total_nans = data.isna().sum().sum()
+            total_cells = data.size
+            nan_percentage = (total_nans / total_cells) * 100
+            
             # For each column, fill NaN with column median
             for col in data.columns:
-                data[col] = data[col].fillna(data[col].median())
+                col_median = data[col].median()
+                if pd.isna(col_median):  # If median is NaN (all values are NaN)
+                    data[col] = data[col].fillna(0)
+                else:
+                    data[col] = data[col].fillna(col_median)
+            
             # Fill any remaining NaNs with 0
             data = data.fillna(0)
-            print(f"Warning: Missing values were present and filled with median values")
+            print(f"Warning: {total_nans} missing values ({nan_percentage:.1f}% of data) were filled with median values")
         
         # Apply standardization before clustering
         if params.get('standardize') == 'rows':
@@ -445,16 +511,20 @@ class HeatmapPlot(VisualizationType):
             zero_var_rows = row_std == 0
             if zero_var_rows.any():
                 print(f"Warning: {zero_var_rows.sum()} rows had zero variance and were not standardized")
-                data.loc[~zero_var_rows] = ((data.loc[~zero_var_rows].T - data.loc[~zero_var_rows].mean(axis=1)) / 
-                                          data.loc[~zero_var_rows].std(axis=1)).T
+                # Only standardize rows with non-zero variance
+                if (~zero_var_rows).any():  # If there are any non-zero variance rows
+                    data.loc[~zero_var_rows] = ((data.loc[~zero_var_rows].T - data.loc[~zero_var_rows].mean(axis=1)) / 
+                                              data.loc[~zero_var_rows].std(axis=1)).T
         elif params.get('standardize') == 'columns':
             # Check for zero variance columns
             col_std = data.std()
             zero_var_cols = col_std == 0
             if zero_var_cols.any():
                 print(f"Warning: {zero_var_cols.sum()} columns had zero variance and were not standardized")
-                data.loc[:, ~zero_var_cols] = ((data.loc[:, ~zero_var_cols] - data.loc[:, ~zero_var_cols].mean()) / 
-                                             data.loc[:, ~zero_var_cols].std())
+                # Only standardize columns with non-zero variance
+                if (~zero_var_cols).any():  # If there are any non-zero variance columns
+                    data.loc[:, ~zero_var_cols] = ((data.loc[:, ~zero_var_cols] - data.loc[:, ~zero_var_cols].mean()) / 
+                                                 data.loc[:, ~zero_var_cols].std())
         
         clustering_info = {
             'row_linkage': None,
@@ -498,6 +568,15 @@ class HeatmapPlot(VisualizationType):
         try:
             # Preprocess the data
             data, clustering_info = self.preprocess_data(df, params)
+            
+            # Check if we have any data to plot
+            if data.empty:
+                raise Exception("No data available for heatmap after preprocessing")
+                
+            # Check if data contains any non-finite values
+            if not np.isfinite(data.values).all():
+                print("Warning: Data contains non-finite values. Replacing with zeros.")
+                data = data.replace([np.inf, -np.inf], np.nan).fillna(0)
             
             # Determine if we should center the colorscale
             center_scale = params.get('standardize') is not None
@@ -639,14 +718,32 @@ class GeoMap(VisualizationType):
                 if params['size'] in df.columns:
                     # Column-based size
                     size_values = df[params['size']]
-                    if not pd.to_numeric(size_values, errors='coerce').notna().all():
-                        raise Exception(f"Size column '{params['size']}' must contain numeric values")
+                    
+                    # Convert to numeric, coercing non-numeric values to NaN
+                    numeric_size_values = pd.to_numeric(size_values, errors='coerce')
+                    
+                    # Check if we have any valid numeric values
+                    if not numeric_size_values.notna().any():
+                        raise Exception(f"Size column '{params['size']}' must contain at least some numeric values")
+                    
+                    # Replace NaN values with the median of valid values or a default
+                    median_size = numeric_size_values.median()
+                    if pd.isna(median_size):  # If all values are NaN
+                        numeric_size_values = numeric_size_values.fillna(15)  # Default size
+                    else:
+                        numeric_size_values = numeric_size_values.fillna(median_size)
+                    
                     # Scale sizes for better visualization
                     size_min, size_max = 10, 50  # Reasonable size range
-                    marker_size = size_min + (size_max - size_min) * (
-                        (size_values - size_values.min()) / 
-                        (size_values.max() - size_values.min())
-                    )
+                    size_range = numeric_size_values.max() - numeric_size_values.min()
+                    
+                    if size_range > 0:
+                        marker_size = size_min + (size_max - size_min) * (
+                            (numeric_size_values - numeric_size_values.min()) / size_range
+                        )
+                    else:
+                        # If all values are the same, use a fixed size
+                        marker_size = (size_min + size_max) / 2
                 else:
                     # Static size - try to convert to number
                     try:
@@ -660,12 +757,27 @@ class GeoMap(VisualizationType):
             if params.get('color'):
                 if params['color'] in df.columns:
                     color_values = df[params['color']]
-                    if pd.api.types.is_numeric_dtype(color_values):
+                    
+                    # Check if the column can be treated as numeric
+                    numeric_color_values = pd.to_numeric(color_values, errors='coerce')
+                    has_numeric_values = numeric_color_values.notna().any()
+                    
+                    if has_numeric_values and pd.api.types.is_numeric_dtype(color_values):
                         # Numeric color scale
-                        marker_color = color_values
+                        # Replace NaN values with a default or median
+                        if numeric_color_values.isna().any():
+                            median_color = numeric_color_values.median()
+                            if pd.isna(median_color):
+                                numeric_color_values = numeric_color_values.fillna(0)
+                            else:
+                                numeric_color_values = numeric_color_values.fillna(median_color)
+                        
+                        marker_color = numeric_color_values
                         colorscale = 'viridis'
                     else:
                         # Categorical colors
+                        # Handle NaN values by converting them to a string representation
+                        color_values = color_values.fillna('N/A')
                         unique_values = color_values.unique()
                         color_sequence = self.generate_colors(len(unique_values))
                         color_map = dict(zip(unique_values, color_sequence))
@@ -694,8 +806,8 @@ class GeoMap(VisualizationType):
                 'text': [
                     f"Latitude: {lat:.4f}<br>"
                     f"Longitude: {lon:.4f}<br>"
-                    + (f"{params['size']}: {size}<br>" if params.get('size') in df.columns else "")
-                    + (f"{params['color']}: {color}<br>" if params.get('color') in df.columns else "")
+                    + (f"{params['size']}: {size if pd.notna(size) else 'N/A'}<br>" if params.get('size') in df.columns else "")
+                    + (f"{params['color']}: {color if pd.notna(color) else 'N/A'}<br>" if params.get('color') in df.columns else "")
                     for lat, lon, size, color in zip(
                         lat, lon,
                         df[params['size']] if params.get('size') in df.columns else [None] * len(lat),

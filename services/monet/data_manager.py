@@ -13,6 +13,7 @@ from urllib.parse import urljoin
 import json
 from functools import lru_cache
 from tqdm import tqdm
+import time
 
 from .models import MONetConfig, GeoPoint, GeoBBox
 
@@ -78,8 +79,8 @@ class MONetDataManager:
                 continue
         
         # Calculate geographic coverage
-        lat_col = 'lat_lon_latitude'
-        lon_col = 'lat_lon_longitude'
+        lat_col = 'latitude'
+        lon_col = 'longitude'
         if lat_col in df.columns and lon_col in df.columns:
             lat_stats = df[lat_col].describe()
             lon_stats = df[lon_col].describe()
@@ -97,79 +98,107 @@ class MONetDataManager:
                 'total_locations': len(df.dropna(subset=[lat_col, lon_col]))
             }
         
-        # Update column descriptions with unit information
-        self._column_descriptions = self._get_base_column_descriptions()
-        for col in df.columns:
-            if col.endswith('_has_numeric_value'):
-                unit_col = col.replace('_has_numeric_value', '_has_unit')
-                if unit_col in df.columns:
-                    units = df[unit_col].unique()
-                    units = [u for u in units if pd.notna(u)]
-                    if units and col in self._column_descriptions:
-                        self._column_descriptions[col] += f" (units: {', '.join(units)})"
-        
     def _get_base_column_descriptions(self) -> Dict[str, str]:
         """Get base descriptions for DataFrame columns without unit information."""
         return {
-            # Core measurements
-            'total_carbon_has_numeric_value': 'Total carbon content in soil sample',
-            'total_organic_carbon_has_numeric_value': 'Organic carbon content in soil sample',
-            'total_nitrogen_has_numeric_value': 'Total nitrogen content in soil sample',
-            'total_kjeldahl_nitrogen_has_numeric_value': 'Total Kjeldahl nitrogen (organic nitrogen + ammonia)',
-            'total_sulfur_has_numeric_value': 'Total sulfur content in soil sample',
-            
-            # Nutrient measurements
-            'nh4_n_has_numeric_value': 'Ammonium nitrogen content',
-            'no3_n_has_numeric_value': 'Nitrate nitrogen content',
-            'sulfate_has_numeric_value': 'Sulfate content',
-            
-            # Element measurements
-            'calcium_has_numeric_value': 'Calcium content in soil',
-            'magnesium_has_numeric_value': 'Magnesium content in soil',
-            'potassium_has_numeric_value': 'Potassium content in soil',
-            'sodium_has_numeric_value': 'Sodium content in soil',
-            'iron_has_numeric_value': 'Iron content in soil',
-            'manganate_has_numeric_value': 'Manganese content in soil',
-            'zinc_has_numeric_value': 'Zinc content in soil',
-            'copper_has_numeric_value': 'Copper content in soil',
-            'boron_has_numeric_value': 'Boron content in soil',
-            'phosporous_has_numeric_value': 'Phosphorous content in soil',
-            
-            # Soil properties
-            'bulk_density_has_numeric_value': 'Soil bulk density',
-            'gwc_percent_has_numeric_value': 'Gravimetric water content',
-            'ph': 'Soil pH',
-            'cation_exchange_capacity_has_numeric_value': 'Cation exchange capacity',
-            'total_bases_has_numeric_value': 'Total bases in soil',
-            
-            # Microbial properties
-            'mbc_has_numeric_value': 'Microbial biomass carbon',
-            'mbn_has_numeric_value': 'Microbial biomass nitrogen',
-            'respiration_rate_per_day_has_numeric_value': 'Soil microbial respiration rate',
-            
-            # Location information
-            'lat_lon_latitude': 'Sample location latitude',
-            'lat_lon_longitude': 'Sample location longitude',
-            'elev_has_value_unit_value': 'Sample elevation above sea level',
-            'geo_loc_name': 'Geographic location name',
-            
-            # Sample information
-            'sample_id': 'Unique identifier for the sample',
-            'sample_name': 'Name of the sample',
-            'subsample_name': 'Name of the subsample',
-            'collection_date': 'Date when the sample was collected',
-            'sample_type': 'Type of sample (e.g., soil, sediment)',
-            'core_section': 'Section of the core sample',
-            
             # Project metadata
-            'project_id': 'Unique identifier for the project',
+            'title': 'Title of the project',
+            'project_type': 'Type of the project',
+            'active': 'Project active status',
+            'accepted': 'Project acceptance status',
+            'award_doi': 'DOI of the project award',
+            'id': 'Unique identifier for the project',
+            'uuid': 'UUID of the project',
+            'uri': 'URI of the project',
+            'abstract': 'Abstract of the project',
+            'started_date': 'Start date of the project',
+            'closed_date': 'Closed date of the project',
+            'current_status': 'Current status of the project',
+            'project_members': 'Members involved in the project',
+
+            # Sampling information
+            'sampling_set': 'Identifier for the sampling set',
             'study_id': 'Unique identifier for the study',
-            'proposal_id': 'Unique identifier for the proposal',
-            'proposal_title': 'Title of the research proposal',
-            'principal_investigator': 'Lead researcher conducting the study',
-            'collaborating_institution': 'Institution collaborating on the study',
-            'project_start': 'Start date of the project',
-            'project_end': 'End date of the project'
+            'sample_type': 'Type of sample (e.g., soil, sediment)',
+            'collection_date': 'Date when the sample was collected',
+            'geolocation': 'Geographic location name',
+            'latitude': 'Sample location latitude',
+            'longitude': 'Sample location longitude',
+            'elevation.value': 'Sample elevation above sea level',
+            'elevation.unit': 'Unit of sample elevation',
+            'neon_domain': 'NEON domain of the sample location',
+            'crop_rotation': 'Crop rotation status',
+            'cur_land_use': 'Current land use at the sample location',
+            'cur_vegetation': 'Current vegetation at the sample location',
+
+            # Soil metadata
+            'core_collector': 'Person or entity that collected the core sample',
+            'fao_class': 'FAO soil classification',
+            'infiltration_notes': 'Notes on soil infiltration',
+            'link_climate_info': 'Link to climate information',
+            'drainage_class': 'Drainage class of the soil',
+            'water_content_meth': 'Method used to measure water content',
+            'soil_type': 'Type of soil',
+            'soil_type_meth': 'Method used to classify soil type',
+            'previous_land_use': 'Previous land use at the sample location',
+            'agrochem_addition': 'Agrochemical addition status',
+            'tillage': 'Tillage practices',
+            'previous_land_use_meth': 'Method used to determine previous land use',
+            'land_use': 'Current land use',
+            'ecoregion': 'Ecoregion of the sample location',
+            'vegetation': 'Vegetation at the sample location',
+
+            # Sample information
+            'id_sample': 'Unique identifier for the sample',
+            'core_section': 'Section of the core sample',
+            'density': 'Soil bulk density',
+            'carbon': 'Total carbon content in soil sample',
+            'nitrogen': 'Total nitrogen content in soil sample',
+            'kj_nitro': 'Total Kjeldahl nitrogen (organic nitrogen + ammonia)',
+            'sulfur': 'Total sulfur content in soil sample',
+            'enzyme': 'Enzyme activity in soil sample',
+            'sample_name': 'Name of the sample',
+            'mz_percent': 'Mass-to-charge ratio percentage',
+            'rms': 'Root mean square value',
+            'hc_ratio': 'Hydrogen to carbon ratio',
+            'oc_ratio': 'Oxygen to carbon ratio',
+            'c_ratio': 'Carbon ratio',
+            'dbe_average': 'Average double bond equivalent',
+            'water_content': 'Gravimetric water content',
+
+            # Nutrient measurements
+            'sulfate': 'Sulfate content',
+            'boron': 'Boron content in soil',
+            'zinc': 'Zinc content in soil',
+            'manganate': 'Manganese content in soil',
+            'copper': 'Copper content in soil',
+            'iron': 'Iron content in soil',
+            'calcium': 'Calcium content in soil',
+            'magnesium': 'Magnesium content in soil',
+            'sodium': 'Sodium content in soil',
+            'potassium': 'Potassium content in soil',
+            'total_bases': 'Total bases in soil',
+            'cation_exchange_capacity': 'Cation exchange capacity',
+
+            # Microbial properties
+            'mbc': 'Microbial biomass carbon',
+            'mbn': 'Microbial biomass nitrogen',
+            'nh4n': 'Ammonium nitrogen content',
+            'no3n': 'Nitrate nitrogen content',
+            'phosphorus': 'Phosphorus content in soil',
+            'extraction': 'Extraction method used',
+            'ph': 'Soil pH',
+            'rate': 'Respiration rate of microbes in soil',
+
+            # Soil texture
+            'sand': 'Sand content in soil',
+            'silt': 'Silt content in soil',
+            'clay': 'Clay content in soil',
+            'type': 'Type of soil texture',
+
+            # Organic content
+            'toc': 'Total organic carbon content',
+            'tn': 'Total nitrogen content'
         }
     
     def get_dataframe_context(self) -> Dict[str, Any]:
@@ -203,122 +232,125 @@ class MONetDataManager:
         """Build unified DataFrame from all data sources."""
         try:
             # Fetch all data first
-            studies = self._fetch_dataset('study')
-            sampling_activities = self._fetch_dataset('samplingactivities')
-            samples = self._fetch_dataset('samples')
-            processed_data = self._fetch_dataset('processeddata')
+            # Fetch study data
+            print("Fetching study data...")
+            url = 'https://sc-data.emsl.pnnl.gov/study'
+            headers = {'accept': 'application/json'}
 
-            # Handle samples response format
-            if isinstance(samples, dict) and 'samples' in samples:
-                samples = samples['samples']
-            elif isinstance(samples, list):
-                pass
+            response = requests.get(url, headers=headers)
+
+            # Check if the request was successful
+            if response.status_code == 200:
+                # Parse the JSON response
+                emsl_study = response.json()
             else:
-                print("Warning: Unexpected samples format")
-                samples = []
+                print(f"Request failed with status code {response.status_code}")
+            df_study=pd.json_normalize(emsl_study)
 
-            if not all([studies, sampling_activities, samples, processed_data]):
-                print("Warning: Some datasets are empty")
-                return pd.DataFrame()
+            # Fetch study metadata
+            print("Fetching study metadata...")
+            study_meta=[]
+            for sid in df_study['id']:
+                url = f'https://sc-data.emsl.pnnl.gov/study/{sid}'
+                headers = {
+                    'accept': 'application/json',
+                }
+                response = requests.get(url, headers=headers)
+                study_meta.append(response.json())
+            df_study_meta=pd.json_normalize(study_meta)
 
-            # Collect all DataFrames to concatenate at the end
-            df_list = []
-                
-            # Process studies with progress bar
-            for study in tqdm(studies, desc="Building unified DataFrame"):
-                # Create study DataFrame
-                study_df = pd.DataFrame([self._flatten_dict(study)])
-                study_df.rename(columns={'id': 'study_id'}, inplace=True)
-                
-                # Find related sampling activities
-                for activity in sampling_activities:
-                    if activity['study_id'] != study['id']:
-                        continue
-                        
-                    # Create activity DataFrame
-                    activity_df = pd.DataFrame([self._flatten_dict(activity)])
-                    activity_df.rename(columns={
-                        'id': 'samplingactivity_id',
-                        'type': 'samplingactivity_type'
-                    }, inplace=True)
-                    activity_df.drop(columns=['study_id', 'sample_id', 'sample_name'], errors='ignore', inplace=True)
-                    
-                    # Find related samples
-                    for sample in samples:
-                        if sample['id'] not in activity['sample_id']:
-                            continue
-                            
-                        # Create sample DataFrame
-                        sample_df = pd.DataFrame([self._flatten_dict(sample)])
-                        sample_df.rename(columns={'id': 'sample_id', 'type': 'sample_type'}, inplace=True)
-                        
-                        # Find related processed data
-                        if 'unique_ID' in sample and 'sampling_set' in sample:
-                            subsamples = [
-                                d for d in processed_data 
-                                if (str(d.get('proposal_id')) == str(sample['unique_ID']) and 
-                                    str(d.get('sampling_set')) == str(sample['sampling_set']))
-                            ]
-                            
-                            # Group by subsample name
-                            for subsample_name in list({m['sample_name'] for m in subsamples}):
-                                measurements = [m for m in subsamples if m['sample_name'] == subsample_name]
-                                
-                                if measurements:
-                                    # Create measurements DataFrame
-                                    measurements_df = pd.DataFrame([self._flatten_dict(m) for m in measurements])
-                                    measurements_df.rename(columns={
-                                        'id': 'processeddata_id',
-                                        'sample_name': 'subsample_name'
-                                    }, inplace=True)
-                                    measurements_df.drop(columns=['sampling_set'], errors='ignore', inplace=True)
-                                    
-                                    # Combine all DataFrames
-                                    combined_df = pd.concat([
-                                        study_df.copy(),
-                                        activity_df.copy(),
-                                        sample_df.copy()
-                                    ], axis=1)
-                                    
-                                    # Repeat combined_df to match measurements
-                                    if len(measurements_df) > 1:
-                                        combined_df = pd.concat([combined_df] * len(measurements_df), ignore_index=True)
-                                    
-                                    # Add measurements
-                                    result_df = pd.concat([combined_df, measurements_df], axis=1)
-                                    df_list.append(result_df)
+            # Fetch samples
+            print("Fetching samples...")
+            samples=self.get_all_data('https://sc-data.emsl.pnnl.gov/sample',params={'per_page':100},accessor='samples')
+            df_samples = pd.json_normalize(samples)
+            df_samples.columns = [c.split('.')[1] if 'soil_metadata' in c else c for c in df_samples.columns] 
+
+            # Fetch analysis metadata
+            print("Fetching analysis metadata...")
+            response = requests.get('https://sc-data.emsl.pnnl.gov/elastic/metadata', headers={'accept': 'application/json'})
+            analysis_metadata=response.json()
+            df_analysis=pd.json_normalize(analysis_metadata)
+            df_analysis.columns=[c.split('.')[-1] for c in df_analysis.columns]
+
+            analyses=["Bulk_Density","Elemental_Analysis","Enzyme","FTICR","Gravimetric_Water_Content","Ion_Analysis","Microbial_Biomass","Nitrogen_Extraction","Phosphorus_Extraction","pH","Respiration","Texture","TOC_TN"]
+            print("Fetching measurements...")   
+            measurements={}
+            for a in analyses:
+                measurements[a]=pd.json_normalize(self.get_all_data(f'https://sc-data.emsl.pnnl.gov/elastic/{a}',params={'per_page':100,'data':'true'}))    
             
-            # Combine all results
-            if not df_list:
-                return pd.DataFrame()
-                
-            final_df = pd.concat(df_list, ignore_index=True, sort=False)
+            # Ensure consistent column types for proposal_id
+            print("Ensuring consistent column types for proposal_id...")
+            df_study['id'] = df_study['id'].astype(str)
+            df_study_meta['id'] = df_study_meta['id'].astype(str)
+            df_samples['proposal_id'] = df_samples['proposal_id'].astype(str)
+            df_samples['sampling_set'] = df_samples['sampling_set'].astype(str)
+            df_analysis['proposal_id'] = df_analysis['proposal_id'].astype(str)
+            df_analysis['sampling_set'] = df_analysis['sampling_set'].astype(str)
+            for measurement_type, measurement_df in measurements.items():
+                measurement_df['proposal_id'] = measurement_df['proposal_id'].astype(str)
+                measurement_df['sampling_set'] = measurement_df['sampling_set'].astype(str)
+
+            print("Merging dataframes...")
+            # Merge studies with study metadata
+            merged_studies_df = pd.merge(df_study, df_study_meta, on='id', how='left',suffixes=('', '_meta'))
+
+            # Merge samples with studies
+            merged_samples_df = pd.merge(df_samples, merged_studies_df, left_on='proposal_id', right_on='id', how='left',suffixes=('_sample', ''))
+
+            # Merge analysis metadata with samples
+            merged_analysis_df = pd.merge(df_analysis, merged_samples_df, on=['proposal_id', 'sampling_set'], how='left',suffixes=('_analysis', ''))
+
+            # Generate a list of unique core sections from all measurement DataFrames
+            unique_core_sections = pd.concat([df[['core_section']] for df in measurements.values()]).drop_duplicates().reset_index(drop=True)
+
+            # Expand merged_analysis_df for each core section
+            expanded_master_df = merged_analysis_df.merge(unique_core_sections, how='cross')
+
+            # Sequentially merge each measurement DataFrame
+            for measurement_type, measurement_df in measurements.items():
+                expanded_master_df = pd.merge(expanded_master_df, measurement_df, on=['proposal_id', 'sampling_set', 'core_section'], how='left')
+
+            print("Cleaning up columns...")
+            expanded_master_df=expanded_master_df[[c for c in expanded_master_df if not c.endswith('_meta') and not c.endswith('_analysis')]]
+            study_cols=[c for c in expanded_master_df if c in df_study]
+            study_meta_cols=[d for d in [c for c in expanded_master_df if c in df_study_meta] if d not in study_cols]
+            study_order=study_cols+study_meta_cols
+            sample_order=[c for c in expanded_master_df if c in df_samples and c not in study_order and c != 'proposal_id']
+            analysis_order=[c for c in expanded_master_df if c in df_analysis and c not in study_order+sample_order and c!='proposal_id']
+            measurement_order=[c for c in expanded_master_df if c not in study_order+sample_order+analysis_order and c!='proposal_id']
+            expanded_master_df=expanded_master_df[study_order+sample_order+analysis_order+measurement_order]
             
-            # Drop known problematic columns
-            final_df.drop(['lat_lon_has_raw_value', 'elev_has_raw_value'], 
-                         axis=1, errors='ignore', inplace=True)
-            final_df.drop(['rms_id','rms_has_unit','rms_has_numeric_value',
-                          'percent_mz_assigned_id','percent_mz_assigned_has_unit',
-                          'percent_mz_assigned_has_numeric_value'],
-                          axis=1, errors='ignore', inplace=True)
-            
-            # Apply type coercion
-            type_list = {
-                col: 'float' if any(x in col for x in ['value', 'latitude', 'longitude', 'average']) 
-                              or col in ['ph', 'aq', 'rep']
-                       else 'int' if col == 'filesize'
-                       else 'datetime' if col in ['project_start', 'project_end']
-                       else 'str'
-                for col in final_df.columns
-            }
-            
-            final_df = self._coerce_column_types(final_df, type_list)
-            
-            return final_df
+            expanded_master_df['latitude']=expanded_master_df['latitude'].astype('float64')
+            expanded_master_df['longitude']=expanded_master_df['longitude'].astype('float64')
+
+            # Convert columns to datetime, handling missing values and different formats
+            expanded_master_df['started_date'] = pd.to_datetime(expanded_master_df['started_date'], errors='coerce')
+            expanded_master_df['closed_date'] = pd.to_datetime(expanded_master_df['closed_date'], errors='coerce')
+            expanded_master_df['collection_date'] = pd.to_datetime(expanded_master_df['collection_date'], errors='coerce')
+
+            expanded_master_df['project_members']=expanded_master_df['project_members'].astype(str)
+            return expanded_master_df
                 
         except Exception as e:
             print(f"Error building unified DataFrame: {str(e)}")
             return pd.DataFrame()
+        
+    def get_all_data(self,base_url, params={'per_page':20},accessor='data'):
+        all_data = []
+        page = 1
+        while True:
+            params['page']=page
+            response = requests.get(base_url, params=params,headers={'accept': 'application/json'})
+            if response.status_code == 200:
+                data = response.json()
+                if not data.get(accessor, []):
+                    break
+                all_data.extend(data[accessor])
+                page += 1
+                time.sleep(1)  # Respect rate limits
+            else:
+                break
+        return all_data
 
     def _fetch_dataset(self, name: str) -> List[Dict]:
         """Fetch a specific dataset with proper error handling.
@@ -404,8 +436,8 @@ class MONetDataManager:
             return self.unified_df
             
         df = self.unified_df
-        lat_col = 'lat_lon_latitude'
-        lon_col = 'lat_lon_longitude'
+        lat_col = 'latitude'
+        lon_col = 'longitude'
         
         if point:
             # Convert radius to approximate degrees

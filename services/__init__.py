@@ -22,6 +22,8 @@ from .dataset_service import DatasetService
 from .chat_llm_service import ChatLLMService
 from .nmdc_service import NMDCService
 from .monet.service import MONetService
+from .uniprot.service import UniProtService
+from .usgs import get_service as get_usgs_service
 
 # Create global service registry
 registry = ServiceRegistry()
@@ -34,6 +36,8 @@ dataset_service = DatasetService()
 literature_service = LiteratureService()
 nmdc_service = NMDCService()
 monet_service = MONetService()
+uniprot_service = UniProtService()
+usgs_water_service = get_usgs_service()
 
 # Register basic services
 registry.register(store_report_service)
@@ -44,6 +48,8 @@ registry.register(literature_service)
 registry.register(ChatLLMService())
 registry.register(nmdc_service)
 registry.register(monet_service)
+registry.register(uniprot_service)
+registry.register(usgs_water_service)
 
 def initialize_index_search(text_searcher: Any, text_searcher_db: Any) -> None:
     """Initialize the index search service with available searchers.
@@ -74,7 +80,8 @@ __all__ = [
     'ChatService',
     'ServiceRegistry',
     'registry',
-    'initialize_index_search'
+    'initialize_index_search',
+    'get_usgs_service'
 ]
 
 __version__ = '0.1.0' 

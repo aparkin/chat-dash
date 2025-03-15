@@ -261,11 +261,71 @@ return ServiceResponse(
    - Allow for service composition
    - Maintain clean interfaces
 
-## Example Services
+## Current Services
 
-See existing implementations for reference:
-- `LiteratureService`: Complex search and refinement
-- `StoreReportService`: Simple reporting and analysis
+The ChatDash system includes the following services:
+
+1. **LiteratureService**
+   - Scientific literature search and analysis
+   - Vector-based semantic search
+   - Result refinement with adjustable thresholds
+   - Dataset conversion capabilities
+
+2. **DatabaseService**
+   - SQL query handling and execution
+   - Schema introspection and management
+   - Result processing and formatting
+   - Natural language to SQL conversion
+
+3. **NMDCService**
+   - Microbiome data access and integration
+   - API integration with NMDC endpoints
+   - Query building and parameter handling
+   - Standardized metadata representation
+
+4. **UniProtService**
+   - Protein data querying and analysis
+   - Sequence and structure information
+   - Biological context and annotations
+   - Cross-reference management
+
+5. **USGSWaterService**
+   - Water quality data access and analysis
+   - Geographic site location search
+   - Time-series data retrieval
+   - Parameter metadata and search
+   - Dataset conversion capabilities
+
+6. **StoreReportService**
+   - Data store reporting and analysis
+   - Status monitoring and diagnostics
+   - Usage statistics and summaries
+
+7. **MONetService**
+   - Soil microbiome data access
+   - Geographic search capabilities
+   - Filter-based query construction
+   - Data visualization support
+
+8. **IndexService**
+   - Database schema indexing
+   - Table and column metadata extraction
+   - Relationship mapping
+   - Schema visualization support
+
+9. **VisualizationService**
+   - Interactive data visualization
+   - Chart and graph generation
+   - Geographic mapping
+   - Custom visualization parameters
+   - Multi-dataset visualization
+
+10. **DatasetService**
+    - Dataset creation and management
+    - Data transformation and filtering
+    - Profile report generation
+    - Dataset conversion and export
+    - Cross-dataset operations
 
 ## Contributing
 
@@ -559,4 +619,306 @@ To convert to dataset: convert {query_id} to dataset"""
    - Command pattern tests
    - Error handling tests
 
-This comprehensive pattern ensures that new services meet all system requirements while maintaining consistency and reliability. 
+This comprehensive pattern ensures that new services meet all system requirements while maintaining consistency and reliability.
+
+# ChatDash Service Development Guide
+
+This guide explains how to create new services for ChatDash using the provided template and best practices learned from existing implementations.
+
+## Service Architecture
+
+ChatDash services follow a consistent architecture with these key components:
+
+1. **Base Classes**
+   - `ChatService`: Core service functionality
+   - `LLMServiceMixin`: LLM integration capabilities
+
+2. **Required Implementations**
+   ```python
+   class MyService(ChatService, LLMServiceMixin):
+       def __init__(self):
+           ChatService.__init__(self, "my_service")
+           LLMServiceMixin.__init__(self, "my_service")
+   ```
+
+3. **Message Flow**
+   ```
+   User Message → can_handle() → parse_request() → execute() → ServiceResponse
+                                     ↓
+                            LLM Processing (if needed)
+                            process_message()
+                            summarize()
+   ```
+
+## Creating a New Service
+
+1. **Copy the Template**
+   - Start with `template_service.py`
+   - Rename class and update service name
+   - Customize request types for your service
+
+2. **Required Methods**
+   ```python
+   def can_handle(self, message: str) -> bool:
+       """Efficient message detection."""
+       message = message.strip()
+       
+       # Check for service blocks
+       if self.query_block_re.search(message):
+           return True
+           
+       # Check for execution commands
+       return any(pattern.search(message) for pattern in self.execution_res)
+   
+   def parse_request(self, message: str) -> Dict[str, Any]:
+       """Standardized request parsing."""
+       message = message.strip()
+       
+       # REQUIRED: Handle all command types
+       if match := self.query_block_re.search(message):
+           return {
+               'type': 'direct_query',
+               'query': self._parse_query_block(match.group(1))
+           }
+       
+       # REQUIRED: Handle execution commands
+       if match := re.match(r'^service\.search\s+(service_name_query_\d{8}_\d{6}(?:_orig|_alt\d+))', message):
+           return {
+               'type': 'execute_query',
+               'query_id': match.group(1)
+           }
+       
+       raise ValueError(f"Unable to parse request: {message}")
+   
+   def execute(self, request: Dict[str, Any], context: Dict[str, Any]) -> ServiceResponse:
+       """Main execution logic."""
+       try:
+           # REQUIRED: Store context for LLM
+           self.context = context
+           
+           if request['type'] == 'direct_query':
+               return self._handle_direct_query(request['query'], context)
+           elif request['type'] == 'execute_query':
+               return self._handle_query_execution(request['query_id'], context)
+           # ... handle other types ...
+           
+       except Exception as e:
+           return ServiceResponse(
+               messages=[ServiceMessage(
+                   service=self.name,
+                   content=f"Error: {str(e)}",
+                   message_type=MessageType.ERROR
+               )]
+           )
+   ```
+
+3. **LLM Integration**
+   ```python
+   def process_message(self, message: str, chat_history: List[Dict]) -> str:
+       """Process messages with LLM."""
+       # Create focused system prompt
+       system_prompt = self._create_system_prompt(chat_history)
+       
+       # Call LLM with context
+       return self._call_llm(
+           messages=[
+               {"role": "system", "content": system_prompt},
+               {"role": "user", "content": message}
+           ]
+       )
+   
+   def summarize(self, content: str, chat_history: List[Dict]) -> str:
+       """Generate summaries with LLM."""
+       prompt = self._create_summary_prompt(content)
+       return self._call_llm([{"role": "user", "content": prompt}])
+   ```
+
+## Best Practices
+
+1. **Message Handling**
+   - Use clear regex patterns for command detection
+   - Support both direct and natural language queries
+   - Maintain consistent command formats
+   - Provide helpful error messages
+
+2. **LLM Integration**
+   - Create focused system prompts
+   - Maintain relevant context
+   - Use consistent temperature settings
+   - Handle errors gracefully
+
+3. **State Management**
+   - Cache expensive operations (schemas, capabilities)
+   - Clear state between requests
+   - Use immutable state updates
+   - Document state dependencies
+
+4. **Error Handling**
+   - Catch and classify errors
+   - Provide helpful error messages
+   - Maintain service stability
+   - Log errors for debugging
+
+5. **Documentation**
+   - Clear docstrings for all methods
+   - Example usage in class docstring
+   - Consistent command documentation
+   - Limitations and requirements
+
+## Common Patterns
+
+1. **Query Execution**
+   ```python
+   def _handle_direct_query(self, query: Dict, context: Dict) -> ServiceResponse:
+       try:
+           # 1. Validate query
+           self._validate_query(query)
+           
+           # 2. Execute query
+           results = self._execute_query(query)
+           
+           # 3. Process results
+           processed = self._process_results(results)
+           
+           # 4. Generate summary
+           summary = self.summarize(processed, context['chat_history'])
+           
+           # 5. Return response
+           return ServiceResponse(
+               messages=[
+                   ServiceMessage(
+                       service=self.name,
+                       content=processed,
+                       message_type=MessageType.RESULT
+                   ),
+                   ServiceMessage(
+                       service=self.name,
+                       content=summary,
+                       message_type=MessageType.SUMMARY
+                   )
+               ]
+           )
+           
+       except Exception as e:
+           return ServiceResponse(
+               messages=[ServiceMessage(
+                   service=self.name,
+                   content=f"Error: {str(e)}",
+                   message_type=MessageType.ERROR
+               )]
+           )
+   ```
+
+2. **Natural Language Processing**
+   ```python
+   def _handle_natural_query(self, query: str, context: Dict) -> ServiceResponse:
+       try:
+           # 1. Process with LLM
+           llm_response = self.process_message(query, context['chat_history'])
+           
+           # 2. Extract executable parts
+           executable = self._extract_executable(llm_response)
+           
+           # 3. Execute and process
+           results = self._execute_query(executable)
+           processed = self._process_results(results)
+           
+           # 4. Return with explanation
+           return ServiceResponse(
+               messages=[
+                   ServiceMessage(
+                       service=self.name,
+                       content=llm_response,
+                       message_type=MessageType.INFO
+                   ),
+                   ServiceMessage(
+                       service=self.name,
+                       content=processed,
+                       message_type=MessageType.RESULT
+                   )
+               ]
+           )
+           
+       except Exception as e:
+           return ServiceResponse(
+               messages=[ServiceMessage(
+                   service=self.name,
+                   content=f"Error: {str(e)}",
+                   message_type=MessageType.ERROR
+               )]
+           )
+   ```
+
+## Testing
+
+1. **Unit Tests**
+   - Test command detection
+   - Test request parsing
+   - Test query execution
+   - Test error handling
+
+2. **Integration Tests**
+   - Test LLM integration
+   - Test state management
+   - Test error recovery
+   - Test performance
+
+3. **Documentation Tests**
+   - Test help text
+   - Test error messages
+   - Test command examples
+   - Test limitations
+
+## Configuration
+
+Services can be configured through environment variables:
+
+```bash
+# LLM Settings
+SERVICE_NAME_MODEL="anthropic/claude-sonnet"
+SERVICE_NAME_TEMPERATURE=0.4
+
+# Service-specific settings
+SERVICE_NAME_SETTING_1="value1"
+SERVICE_NAME_SETTING_2="value2"
+```
+
+## Common Issues
+
+1. **Performance**
+   - Cache expensive operations
+   - Limit context size
+   - Use efficient regex
+   - Profile critical paths
+
+2. **Stability**
+   - Handle all error cases
+   - Validate inputs
+   - Maintain state correctly
+   - Log important events
+
+3. **Usability**
+   - Clear error messages
+   - Helpful suggestions
+   - Consistent formats
+   - Good documentation
+
+## Future Improvements
+
+1. **Enhanced LLM Integration**
+   - Better context management
+   - Improved prompts
+   - More efficient token use
+   - Better error recovery
+
+2. **Extended Capabilities**
+   - More query types
+   - Better summaries
+   - Enhanced analysis
+   - Improved visualization
+
+3. **Better Testing**
+   - More test coverage
+   - Better error simulation
+   - Performance testing
+   - Security testing 

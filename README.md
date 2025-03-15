@@ -8,7 +8,7 @@ ChatDash is an integrated system for interactive data exploration and analysis t
 graph TD
     A[ChatDash Frontend] --> B[Weaviate Vector DB]
     A --> C[SQLite Databases]
-    A --> D[Future Data Sources]
+    A --> D[External Data Sources]
     B --> E[Literature Database]
     C --> F[Converted MySQL DBs]
     D --> G[Government Data - Coming Soon]
@@ -124,6 +124,25 @@ http://0.0.0.0:8051
   - Standardized metadata representation
   - Cross-study data integration
   - Biological data accessibility
+
+##### USGS Water Quality Data
+- Access nationwide water quality monitoring data through:
+  - Natural language: `usgs_water: [your question]`
+  - Parameter search: `usgs_water.parameters [search term]`
+  - Execute queries: `usgs_water.search [query_id]`
+  - Convert to dataset: `convert [query_id] to dataset`
+  - Service info: `tell me about usgs_water`
+- Data coverage:
+  - Nationwide USGS monitoring network
+  - 3000+ water quality parameters
+  - Historical and real-time data
+  - USGS certified measurements
+- Features:
+  - Geographic site location search
+  - Time-series data retrieval and analysis
+  - Parameter metadata and search
+  - Comprehensive data statistics
+  - Interactive dataset conversion
 
 ##### Literature Search
 - Search scientific literature using natural language:
