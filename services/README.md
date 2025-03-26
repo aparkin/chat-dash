@@ -327,6 +327,54 @@ The ChatDash system includes the following services:
     - Dataset conversion and export
     - Cross-dataset operations
 
+## Available Services
+
+### NMDC Enhanced Service
+The NMDC Enhanced Service provides advanced data discovery and analysis capabilities for the National Microbiome Data Collaborative (NMDC) database. It enables researchers to explore environmental microbiome data through:
+
+- Natural language querying
+- Direct SQL querying with DuckDB syntax
+- Advanced data integration across studies and biosamples
+- Statistical analysis and result summarization
+- Geographic and environmental context analysis
+- Dataset management and conversion
+
+Key Features:
+1. **Dual Query Interface**:
+   - Natural language: `nmdc_enhanced: [question]`
+   - Direct SQL: ```nmdc_enhanced [query]```
+
+2. **Rich Data Context**:
+   - Unified view of studies and biosamples
+   - Environmental and geographic metadata
+   - Physical measurements and parameters
+   - Omics data availability
+
+3. **Advanced Analysis**:
+   - Statistical summaries
+   - Geographic distribution analysis
+   - Environmental pattern detection
+   - Result visualization
+
+4. **Data Management**:
+   - Query result storage
+   - Dataset conversion
+   - Profile report generation
+
+Example Usage:
+#### Natural language query
+```python
+nmdc_enhanced: Find soil samples from Washington state with high carbon content
+```
+#### Direct SQL query
+```nmdc_enhanced
+SELECT *
+FROM unified
+WHERE ecosystem = 'soil'
+AND geo_loc_name LIKE '%Washington%'
+AND "tot_org_carb.has_numeric_value" > 5.0
+```
+
 ## Contributing
 
 When adding new services:

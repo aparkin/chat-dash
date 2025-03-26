@@ -27,14 +27,14 @@ class MONetConfig:
         base_url: Base URL for MONet API
         model_name: LLM model to use for interpretations
         temperature: Temperature setting for LLM responses
-        cache_expiry_hours: How long to cache data
+        cache_expiry_hours: How long to cache data (0 disables background refresh)
         default_preview_rows: Number of rows to show in previews
     """
     name: str = "monet"
     base_url: str = "https://sc-data.emsl.pnnl.gov"
     model_name: str = "anthropic/claude-sonnet"
     temperature: float = 0.4
-    cache_expiry_hours: int = 1
+    cache_expiry_hours: int = 24  # Changed from 1 to 24 hours to match NMDC pattern
     default_preview_rows: int = 5
 
 @dataclass

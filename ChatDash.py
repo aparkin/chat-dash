@@ -96,14 +96,14 @@ License: MIT
 """
 
 import dash
-from dash import dcc, html, Input, Output, State, callback, dash_table, ctx, ALL, MATCH
+from dash import dcc, html, Input, Output, State, callback, dash_table, ctx, ALL, MATCH, clientside_callback
 import dash_bootstrap_components as dbc
 import openai
 import os
 import pandas as pd
 import io
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 from ydata_profiling import ProfileReport
 import warnings
@@ -120,7 +120,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import re
 from fuzzywuzzy import fuzz, process
-from typing import Dict, List, Tuple, Optional, Union, Any
+from typing import Dict, List, Tuple, Optional, Union, Any, Iterable
 import colorsys
 from scipy.cluster.hierarchy import linkage, optimal_leaf_ordering, leaves_list
 from scipy.spatial.distance import pdist
@@ -139,6 +139,12 @@ from services import initialize_index_search
 from dash.exceptions import PreventUpdate
 from services import PreviewIdentifier
 from services import ServiceRegistry
+import inspect
+import asyncio
+import weaviate
+import hashlib
+import pickle
+import time
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore', category=Warning)
@@ -2092,7 +2098,15 @@ def render_tab_content(active_tab, selected_dataset, datasets):
                     columns=[{'name': i, 'id': i} for i in df.columns],
                     style_table={'overflowX': 'auto'},
                     style_cell={'textAlign': 'left'},
-                    style_header={'fontWeight': 'bold'}
+                    style_header={'fontWeight': 'bold'},
+                    style_data_conditional=[{
+                        'if': {
+                            'filter_query': '{' + col + '} contains ""',
+                            'column_id': col
+                        },
+                        'textOverflow': 'ellipsis',
+                        'maxWidth': 300
+                    } for col in df.columns]
                 )
             ]
         elif active_tab == "tab-stats":
@@ -3223,5 +3237,5 @@ app.clientside_callback(
 
 if __name__ == '__main__':
     # Start the app
-    app.run_server(debug=True, host='0.0.0.0', port=8051)
+    app.run_server(debug=False, host='0.0.0.0', port=8051)
 

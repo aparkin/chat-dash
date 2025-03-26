@@ -263,13 +263,12 @@ class ChatService(ABC):
         """Determine if this service can handle the message."""
         pass
     
-    @abstractmethod
-    async def parse_request(self, message: str) -> Dict[str, Any]:
+    def parse_request(self, message: str) -> Dict[str, Any]:
         """Extract parameters and requirements from message."""
         pass
     
     @abstractmethod
-    async def execute(self, request: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    def execute(self, request: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the parsed request."""
         pass
         

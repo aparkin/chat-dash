@@ -248,7 +248,18 @@ Format as:
             "   - Summarize the progression of investigation in scientific terms",
             "   - Highlight key turning points in understanding",
             "   - Describe current analytical focus and its scientific significance",
-            "   DO NOT repeat any specific results or analyses",
+
+            "ERROR HANDLING REQUIREMENTS:",
+            "1. When encountering service errors:",
+            "   - NEVER generate fake data or results",
+            "   - NEVER attempt to fix or work around errors",
+            "   - ALWAYS acknowledge errors in context of the user's goal",
+            "   - If appropriate, suggest how to modify the request",
+            
+            "2. When lacking data or information:",
+            "   - NEVER make up or generate placeholder data",
+            "   - ALWAYS clearly state what information is missing",
+            "   - Suggest how to obtain the needed information",
             
             "2. Knowledge Context (2-3 bullet points):",
             "   - Place findings in broader scientific context",
@@ -263,6 +274,45 @@ Format as:
             "   - Explain how each step advances scientific understanding",
             "   - Connect to available data sources and analytical capabilities",
             "   Format each suggestion with clear scientific rationale and expected insights",
+
+            "CHAT HISTORY INTERPRETATION:",
+            "1. Temporal Understanding:",
+            "   - Treat chat history as a chronological sequence of user interactions",
+            "   - Each message represents a step in the user's investigative journey",
+            "   - Service responses show the system's contributions to that journey",
+            "   - Your response should continue this narrative progression",
+            
+            "2. Context Integration:",
+            "   - Previous queries show the user's evolving interests",
+            "   - Service responses indicate available data and capabilities",
+            "   - Error messages highlight challenges encountered",
+            "   - Your response should build upon this accumulated context",
+            
+            "3. Response Continuity:",
+            "   - ALWAYS follow the specified response format",
+            "   - Maintain consistency with previous interactions",
+            "   - Reference relevant previous steps when appropriate",
+            "   - Keep the scientific narrative flowing naturally",
+
+            "CHAT HISTORY PROCESSING:",
+            "1. Raw History:",
+            "   - The system provides you with a processed summary of the chat history",
+            "   - This summary is split into two key components:",
+            "     a) Current Goals and Interests: Summarizes user's evolving objectives",
+            "     b) Analysis Progress and Findings: Tracks the scientific journey",
+            "   - These summaries are provided in the USER CONTEXT section below",
+            
+            "2. How to Use the Processed History:",
+            "   - Use the Current Goals to understand what the user is trying to accomplish",
+            "   - Use the Analysis Progress to understand where they are in their investigation",
+            "   - Build your response to continue this narrative progression",
+            "   - Reference specific points from both summaries when relevant",
+            
+            "3. History Integration:",
+            "   - The processed history represents the system's understanding of the conversation",
+            "   - Your response should build upon this understanding",
+            "   - Maintain continuity with both the goals and progress summaries",
+            "   - Keep the scientific narrative flowing naturally",
 
             "CRITICAL CONSTRAINTS:",
             "1. ABSOLUTELY NO REPETITION OF:",
@@ -398,6 +448,17 @@ General Knowledge:
             
             # Get chat history
             chat_history = context.get('chat_history', [])
+            
+            # Check if the last message was an error from another service
+            last_service_msg = next((msg for msg in reversed(chat_history) if msg.get('service')), None)
+            if last_service_msg and last_service_msg.get('type') == 'error':
+                # Add specific instruction for handling error context
+                system_message += "\n\nIMPORTANT: The last service response was an error. Your role is to:\n"
+                system_message += "1. Acknowledge the error occurred\n"
+                system_message += "2. Explain it in the context of what the user was trying to accomplish\n"
+                system_message += "3. DO NOT attempt to generate any data or results\n"
+                system_message += "4. DO NOT try to fix or work around the error\n"
+                system_message += "5. If appropriate, suggest asking the service again with modified parameters\n"
             
             # Prepare messages for LLM
             messages = [

@@ -115,6 +115,10 @@ class MONetService(ChatService, LLMServiceMixin):
         _ = self.data_manager.unified_df
         print("MONet service initialization complete.")
         
+        # Start background refresh if enabled
+        if config.cache_expiry_hours > 0:
+            self.data_manager.start_background_refresh()
+        
         self.query_builder = MONetQueryBuilder(self.data_manager)
         self.query_context = QueryContext(self.data_manager)
         
@@ -522,11 +526,13 @@ Remember to format the corrected query as valid JSON inside a ```monet``` code b
             system_prompt=load_prompt('results', prompt_context)
         )
         
-        # Store results
+        # Store results - include both preview (for display) and full dataframe (for dataset conversion)
+        preview_data = result.to_preview()
         store_updates = {
             'successful_queries_store': {
                 query_id: {
-                    **result.to_preview(),
+                    **preview_data,
+                    'dataframe': result.dataframe.to_dict('records'),  # Store full dataframe
                     'executed': True  # Mark as executed
                 }
             }
@@ -552,24 +558,43 @@ Remember to format the corrected query as valid JSON inside a ```monet``` code b
         """Handle dataset conversion request."""
         # Get stored query results
         stored_queries = context.get('successful_queries_store', {})
+        datasets_store = context.get('datasets_store', {}) or {}
         stored_query = stored_queries.get(query_id)
+        
+        # Check if dataset already exists in datasets_store
+        if query_id in datasets_store:
+            return ServiceResponse(
+                messages=[
+                    ServiceMessage(
+                        service=self.name,
+                        content=f"Dataset '{query_id}' already exists. This indicates an internal error as datasets should only be created through conversion. Please try a different query.",
+                        message_type=MessageType.ERROR
+                    )
+                ]
+            )
         
         if not stored_query:
             return ServiceResponse(
                 messages=[
                     ServiceMessage(
                         service=self.name,
-                        content=f"No stored query found with ID: {query_id}",
+                        content=f"No stored query found with ID: {query_id}. The query may have expired or never existed.",
                         message_type=MessageType.ERROR
                     )
                 ]
             )
         
         try:
-            # Execute query again to get fresh DataFrame
-            query = stored_query['query']
-            result = self.query_builder.execute_query(query)
-            df = result.dataframe
+            # Use stored dataframe instead of re-executing query
+            if 'dataframe' in stored_query:
+                print(f"Using stored dataframe for dataset conversion of {query_id}")
+                df = pd.DataFrame(stored_query['dataframe'])
+            else:
+                # Only as a fallback if dataframe isn't in stored_query
+                print(f"No stored dataframe found for {query_id}, re-executing query")
+                query = stored_query['query']
+                result = self.query_builder.execute_query(query)
+                df = result.dataframe
             
             # Convert DataFrame to proper format for storage
             df_dict = df.to_dict('records')
@@ -597,7 +622,7 @@ Remember to format the corrected query as valid JSON inside a ```monet``` code b
                 'metadata': {
                     'source': f"MONet Query {query_id}",
                     'creation_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'query': stored_query['query'],
+                    'query': stored_query.get('query'),
                     'rows': len(df),
                     'columns': list(df.columns),
                     'selectable': True,  # Enable dataset selection
@@ -607,7 +632,7 @@ Remember to format the corrected query as valid JSON inside a ```monet``` code b
                 'profile_report': profile_html  # Store HTML version of profile
             }
             
-            # Update stores
+            # Update stores - remove query from successful_queries_store and add to datasets_store
             store_updates = {
                 'datasets_store': {query_id: dataset_entry},
                 'successful_queries_store': {
@@ -706,7 +731,7 @@ Remember to format the corrected query as valid JSON inside a ```monet``` code b
             f"Total columns: {len(df.columns)}",
             f"\nShowing {len(preview_cols)} columns: {', '.join(preview_cols)}",
             "\nPreview:\n",
-            formatted_df.to_markdown(index=False, tablefmt="pipe")
+            "```\n" + formatted_df.to_markdown(index=False, tablefmt="pipe") + "\n```"
         ]
         
         # Add dataset conversion instruction with actual query ID if available

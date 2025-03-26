@@ -57,7 +57,7 @@ class NMDCService(ChatService, LLMServiceMixin):
             pass
         
         # NMDC query block pattern - match both ```nmdc and ``` blocks
-        self.query_block_pattern = r'```nmdc\s*(.*?)```'
+        self.query_block_pattern = r'^```nmdc\s+(.*?)```'
         
         # Query execution patterns
         self.execution_patterns = [

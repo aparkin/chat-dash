@@ -24,6 +24,7 @@ from .nmdc_service import NMDCService
 from .monet.service import MONetService
 from .uniprot.service import UniProtService
 from .usgs import get_service as get_usgs_service
+from .nmdc_enhanced import NMDCEnhancedService
 
 # Create global service registry
 registry = ServiceRegistry()
@@ -38,6 +39,7 @@ nmdc_service = NMDCService()
 monet_service = MONetService()
 uniprot_service = UniProtService()
 usgs_water_service = get_usgs_service()
+nmdc_enhanced_service = NMDCEnhancedService(name="nmdc_enhanced")
 
 # Register basic services
 registry.register(store_report_service)
@@ -50,6 +52,7 @@ registry.register(nmdc_service)
 registry.register(monet_service)
 registry.register(uniprot_service)
 registry.register(usgs_water_service)
+registry.register(nmdc_enhanced_service)
 
 def initialize_index_search(text_searcher: Any, text_searcher_db: Any) -> None:
     """Initialize the index search service with available searchers.

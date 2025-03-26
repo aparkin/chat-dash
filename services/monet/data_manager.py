@@ -14,8 +14,14 @@ import json
 from functools import lru_cache
 from tqdm import tqdm
 import time
+import threading
+import traceback
+import logging
+import pathlib
 
 from .models import MONetConfig, GeoPoint, GeoBBox
+
+logger = logging.getLogger(__name__)
 
 class MONetDataManager:
     """Manages data loading and analysis for MONet service."""
@@ -29,12 +35,112 @@ class MONetDataManager:
         self._column_descriptions: Optional[Dict[str, str]] = None
         self._geographic_coverage: Optional[Dict[str, Any]] = None
         
-        # Load data and calculate statistics immediately
-        print("Initializing MONet database...")
-        self._unified_df = self._build_unified_dataframe()
-        self._calculate_all_statistics()
-        print("Initialization complete.")
+        # Thread safety for cache operations
+        self._cache_lock = threading.Lock()
+        self._refresh_in_progress = False
         
+        # Cache directory setup
+        self._cache_dir = self._get_cache_dir()
+        
+        # Try loading from cache first
+        if not self._load_from_cache():
+            # If cache load fails, load from API using existing logic
+            logger.info("Cache not available or invalid, loading data from API...")
+            self._unified_df = self._build_unified_dataframe()
+            if self._unified_df is not None and not self._unified_df.empty:
+                self._cache_timestamp = datetime.now()
+                self._calculate_all_statistics()
+                # Save to cache
+                self._save_to_cache()
+                logger.info(f"Successfully loaded {len(self._unified_df)} rows from API")
+            else:
+                logger.error("Failed to load data from API")
+                self._unified_df = pd.DataFrame()
+        
+    def _get_cache_dir(self) -> pathlib.Path:
+        """Get the cache directory path, creating it if needed."""
+        # Use the service directory for caching
+        service_dir = pathlib.Path(__file__).parent
+        cache_dir = service_dir / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir
+    
+    def _load_from_cache(self) -> bool:
+        """Load data from cache if available and not expired.
+        
+        Returns:
+            True if cache was loaded successfully, False otherwise
+        """
+        try:
+            cache_file = self._cache_dir / "unified_data.parquet"
+            meta_file = self._cache_dir / "metadata.json"
+            
+            if not (cache_file.exists() and meta_file.exists()):
+                logger.info("No cache files found")
+                return False
+            
+            # Load metadata first to check timestamp
+            with open(meta_file, 'r') as f:
+                metadata = json.load(f)
+            
+            cache_time = datetime.fromisoformat(metadata['timestamp'])
+            cache_age = datetime.now() - cache_time
+            
+            # Check if cache is expired
+            if cache_age.total_seconds() > self.config.cache_expiry_hours * 3600:
+                logger.info(f"Cache is {cache_age.total_seconds()/3600:.1f} hours old - expired")
+                return False
+            
+            # Load cached data
+            logger.info("Loading data from cache...")
+            self._unified_df = pd.read_parquet(cache_file)
+            self._cache_timestamp = cache_time
+            self._stats = metadata.get('statistics')
+            self._column_descriptions = metadata.get('column_descriptions')
+            self._geographic_coverage = metadata.get('geographic_coverage')
+            
+            if self._unified_df is not None and not self._unified_df.empty:
+                logger.info(f"Successfully loaded {len(self._unified_df)} rows from cache")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error loading from cache: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+    
+    def _save_to_cache(self) -> None:
+        """Save current data to cache."""
+        try:
+            if self._unified_df is None or self._unified_df.empty:
+                logger.warning("No data to cache")
+                return
+            
+            logger.info("Saving data to cache...")
+            
+            # Save DataFrame
+            cache_file = self._cache_dir / "unified_data.parquet"
+            self._unified_df.to_parquet(cache_file, index=False)
+            
+            # Save metadata
+            meta_file = self._cache_dir / "metadata.json"
+            metadata = {
+                'timestamp': self._cache_timestamp.isoformat(),
+                'statistics': self._stats,
+                'column_descriptions': self._column_descriptions,
+                'geographic_coverage': self._geographic_coverage
+            }
+            
+            with open(meta_file, 'w') as f:
+                json.dump(metadata, f)
+            
+            logger.info(f"Successfully cached {len(self._unified_df)} rows")
+            
+        except Exception as e:
+            logger.error(f"Error saving to cache: {str(e)}")
+            logger.error(traceback.format_exc())
+            
     def _calculate_all_statistics(self) -> None:
         """Calculate and store all statistics about the DataFrame."""
         if self._unified_df is None or self._unified_df.empty:
@@ -42,6 +148,9 @@ class MONetDataManager:
             return
             
         df = self._unified_df
+        
+        # Initialize column descriptions
+        self._column_descriptions = self._get_base_column_descriptions()
         
         # Calculate basic statistics
         self._stats = {
@@ -458,3 +567,50 @@ class MONetDataManager:
                 (df[lon_col] <= bbox.max_lon)
             )
             return df[mask] 
+
+    def start_background_refresh(self) -> None:
+        """Start a background refresh of the cache if needed."""
+        with self._cache_lock:
+            if self._refresh_in_progress:
+                logger.warning("Background refresh already in progress")
+                return
+                
+            # Check if cache is old enough to warrant refresh
+            if self._cache_timestamp:
+                cache_age = datetime.now() - self._cache_timestamp
+                if cache_age.total_seconds() < self.config.cache_expiry_hours * 3600:
+                    logger.info(f"Cache is only {cache_age.total_seconds()/3600:.1f} hours old, skipping refresh")
+                    return
+            
+            logger.info("Starting background cache refresh")
+            self._refresh_in_progress = True
+            
+            def refresh():
+                try:
+                    # Use existing data loading logic
+                    logger.info("Building new unified DataFrame...")
+                    temp_df = self._build_unified_dataframe()
+                    
+                    if temp_df is not None and not temp_df.empty:
+                        with self._cache_lock:
+                            old_size = len(self._unified_df) if self._unified_df is not None else 0
+                            logger.info(f"Swapping DataFrames: {old_size} rows -> {len(temp_df)} rows")
+                            self._unified_df = temp_df
+                            self._cache_timestamp = datetime.now()
+                            logger.info("Calculating statistics for new DataFrame...")
+                            self._calculate_all_statistics()
+                            logger.info("Saving new data to cache...")
+                            self._save_to_cache()
+                            new_size = len(self._unified_df)
+                            logger.info(f"Background refresh complete. Rows: {old_size} -> {new_size}")
+                    else:
+                        logger.error("Background refresh failed - new data is empty")
+                except Exception as e:
+                    logger.error(f"Error in background refresh: {str(e)}")
+                    logger.error(traceback.format_exc())
+                finally:
+                    self._refresh_in_progress = False
+            
+            # Start refresh in background thread
+            thread = threading.Thread(target=refresh, daemon=True)
+            thread.start() 

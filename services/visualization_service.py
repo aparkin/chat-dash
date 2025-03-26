@@ -152,15 +152,15 @@ class BubblePlot(VisualizationType):
         params = {}
         
         # Try x=, y= syntax first - preserve original case in parameter
-        x_match = re.search(r'x=(\w+)', message, re.IGNORECASE)
-        y_match = re.search(r'y=(\w+)', message, re.IGNORECASE)
+        x_match = re.search(r'x=([^\s]+)', message, re.IGNORECASE)
+        y_match = re.search(r'y=([^\s]+)', message, re.IGNORECASE)
         
         if x_match and y_match:
             x_col = x_match.group(1)  # Keep original case
             y_col = y_match.group(1)  # Keep original case
         else:
-            # Try vs/versus/against syntax
-            vs_match = re.search(r'plot\s+(\w+)\s+(?:vs|versus|against)\s+(\w+)', message, re.IGNORECASE)
+            # Try vs/versus/against syntax - updated regex to handle dots
+            vs_match = re.search(r'plot\s+([^\s]+)\s+(?:vs|versus|against)\s+([^\s]+)', message, re.IGNORECASE)
             if not vs_match:
                 return {}, "Could not parse plot parameters"
             y_col = vs_match.group(1)  # Keep original case
@@ -175,7 +175,7 @@ class BubblePlot(VisualizationType):
         
         # Handle optional parameters - preserve case in parameter names
         for param in ['color', 'size']:
-            match = re.search(rf'{param}=(\w+)', message, re.IGNORECASE)
+            match = re.search(rf'{param}=([^\s]+)', message, re.IGNORECASE)
             if match:
                 col = match.group(1)  # Keep original case
                 if col not in df.columns:
@@ -345,7 +345,7 @@ class HeatmapPlot(VisualizationType):
         # Define valid parameter names
         valid_params = {'columns', 'rows', 'standardize', 'cluster', 'colormap', 'transpose', 'fcol'}
         
-        # Find all parameter assignments in the message
+        # Find all parameter assignments in the message - updated regex to handle dots
         param_matches = re.finditer(r'(\w+)=([^\s]+)', message)
         unknown_params = []
         
@@ -360,7 +360,7 @@ class HeatmapPlot(VisualizationType):
         # Extract columns parameter with better error handling
         if 'columns=' in message:
             cols_match = re.search(r'columns=\[(.*?)\]', message)
-            cols_regex_match = re.search(r'columns=(\S+)', message)
+            cols_regex_match = re.search(r'columns=([^\s]+)', message)
             
             if not (cols_match or cols_regex_match):
                 return {}, "Malformed columns parameter. Use format: columns=[col1,col2,...] or columns=regex_pattern"
@@ -386,10 +386,10 @@ class HeatmapPlot(VisualizationType):
         else:
             params['columns'] = list(df.columns)  # Default to all columns
         
-        # Extract rows parameter with regex and fcol support
+        # Extract rows parameter with regex and fcol support - updated regex to handle dots
         if 'rows=' in message:
             rows_match = re.search(r'rows=\[(.*?)\]', message)
-            rows_regex_match = re.search(r'rows=(\S+)', message)
+            rows_regex_match = re.search(r'rows=([^\s]+)', message)
             
             if not (rows_match or rows_regex_match):
                 return {}, "Malformed rows parameter. Use format: rows=[row1,row2,...] or rows=regex_pattern fcol=column_name"
@@ -403,7 +403,7 @@ class HeatmapPlot(VisualizationType):
                     return {}, f"Row(s) not found in dataset: {', '.join(invalid_rows)}"
                 params['rows'] = rows
             else:  # Using regex pattern
-                fcol_match = re.search(r'fcol=(\w+)', message)
+                fcol_match = re.search(r'fcol=([^\s]+)', message)
                 if not fcol_match:
                     return {}, "When using regex for rows, must specify fcol=column_name to filter on"
                 
@@ -424,7 +424,7 @@ class HeatmapPlot(VisualizationType):
                     return {}, f"Invalid regex pattern for rows: '{pattern}'"
         
         # Standardize parameter - strict validation
-        std_match = re.search(r'standardize=(\w+)', message)
+        std_match = re.search(r'standardize=([^\s]+)', message)
         if std_match:
             std_value = std_match.group(1).lower()
             if std_value not in ['rows', 'columns']:
@@ -432,7 +432,7 @@ class HeatmapPlot(VisualizationType):
             params['standardize'] = std_value
         
         # Cluster parameter - strict validation
-        cluster_match = re.search(r'cluster=(\w+)', message)
+        cluster_match = re.search(r'cluster=([^\s]+)', message)
         if cluster_match:
             cluster_value = cluster_match.group(1).lower()
             if cluster_value not in ['rows', 'columns', 'both']:
@@ -440,7 +440,7 @@ class HeatmapPlot(VisualizationType):
             params['cluster'] = cluster_value
         
         # Colormap parameter - strict validation with sorted options
-        colormap_match = re.search(r'colormap=(\w+)', message)
+        colormap_match = re.search(r'colormap=([^\s]+)', message)
         if colormap_match:
             colormap = colormap_match.group(1)
             valid_colormaps = sorted(px.colors.named_colorscales())
@@ -449,7 +449,7 @@ class HeatmapPlot(VisualizationType):
             params['colormap'] = colormap
         
         # Transpose parameter - strict validation
-        transpose_match = re.search(r'transpose=(\w+)', message)
+        transpose_match = re.search(r'transpose=([^\s]+)', message)
         if transpose_match:
             transpose_value = transpose_match.group(1).lower()
             if transpose_value not in ['true', 'false']:
@@ -647,9 +647,9 @@ class GeoMap(VisualizationType):
         """Extract map parameters."""
         params = {}
         
-        # Required parameters
-        lat_match = re.search(r'latitude=(\w+)', message)
-        lon_match = re.search(r'longitude=(\w+)', message)
+        # Required parameters - updated regex to handle dots in column names
+        lat_match = re.search(r'latitude=([^\s]+)', message)
+        lon_match = re.search(r'longitude=([^\s]+)', message)
         
         if not (lat_match and lon_match):
             return {}, "Map requires both latitude and longitude parameters"
@@ -663,9 +663,9 @@ class GeoMap(VisualizationType):
         params['latitude'] = lat_col
         params['longitude'] = lon_col
         
-        # Optional parameters
+        # Optional parameters - updated regex to handle dots in column names
         for param in ['color', 'size']:
-            match = re.search(rf'{param}=(\w+)', message)
+            match = re.search(rf'{param}=([^\s]+)', message)
             if match:
                 col = match.group(1)
                 if col not in df.columns:

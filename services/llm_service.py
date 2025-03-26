@@ -219,7 +219,7 @@ class LLMServiceMixin(ABC):
                 })
                 print(f"\nAdded message with role '{role}':", flush=True)
                 print("---", flush=True)
-                print(content, flush=True)
+                print(content[:200], flush=True)
                 print("---", flush=True)
             
             # Ensure we have at least one message
@@ -273,6 +273,30 @@ class LLMServiceMixin(ABC):
                 
                 try:
                     response = self._client.chat.completions.create(**api_params)
+                    
+                    # Extract response content
+                    response_content = response.choices[0].message.content.strip()
+                    print("\nExtracted content:", flush=True)
+                    print("---", flush=True)
+                    print(repr(response_content), flush=True)
+                    print("---", flush=True)
+                    
+                    if not response_content:
+                        raise ValueError("LLM returned empty response")
+                    
+                    # Check token usage if available
+                    if hasattr(response, 'usage'):
+                        usage = response.usage
+                        print(f"\nToken usage - Prompt: {usage.prompt_tokens}, "
+                              f"Completion: {usage.completion_tokens}, "
+                              f"Total: {usage.total_tokens}", flush=True)
+                        
+                        # Check if we're close to max tokens
+                        if usage.completion_tokens >= api_params.get('max_tokens', 4000) * 0.95:
+                            print("Warning: Response using 95%+ of max tokens - may be truncated", flush=True)
+                    
+                    return response_content
+
                 except Exception as api_error:
                     error_msg = str(api_error)
                     if "temperature" in error_msg.lower():
@@ -281,21 +305,12 @@ class LLMServiceMixin(ABC):
                         if 'temperature' in api_params:
                             del api_params['temperature']
                         response = self._client.chat.completions.create(**api_params)
+                    elif "token limit" in error_msg.lower():
+                        print("Error: Token limit exceeded in LLM call", flush=True)
+                        raise ValueError("Query too long - please try a more focused question")
                     else:
                         # Re-raise if it's not a temperature-related error
                         raise
-                
-                # Extract response content
-                response_content = response.choices[0].message.content.strip()
-                print("\nExtracted content:", flush=True)
-                print("---", flush=True)
-                print(repr(response_content), flush=True)
-                print("---", flush=True)
-                
-                if not response_content:
-                    raise ValueError("LLM returned empty response")
-                
-                return response_content
                 
             except Exception as e:
                 print(f"\nAPI call error: {str(e)}", flush=True)
